@@ -111,7 +111,9 @@ To switch later without running setup again:
 | `Esc` | Close (or leave the add form) |
 
 **Quick add** dates accept `today`, `tomorrow`, `fri`, `next fri`, `+3`,
-`+2w`, `oct 20`, `20 oct`, `10/20` and `2026-10-20`. The line under each field
+`+2w`, `oct 20`, `20 oct`, `10/20` and `2026-10-20`, plus phrases like
+`4 weeks from today`, `in 3 days`, `two weeks`, `a month from now`,
+`1 week from tomorrow`, `next week` and `next month`. The line under each field
 shows the date it will save. Name and Due are required. Typing a project name
 that doesn't exist yet offers **+ New project**, which creates it in Airtable
 first.

@@ -16,6 +16,17 @@ function addDays(today, n) {
   return iso(d)
 }
 
+// n months on, clamped to the month's last day: jan 31 + 1 month = feb 28.
+function addMonths(today, n) {
+  var d = parseIso(today)
+  var day = d.getDate()
+  d.setDate(1)
+  d.setMonth(d.getMonth() + n)
+  var last = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()
+  d.setDate(Math.min(day, last))
+  return iso(d)
+}
+
 // Last day of the current week: Sunday when weeks start on Monday,
 // Saturday when they start on Sunday.
 function weekEnd(today, weekStart) {
@@ -31,6 +42,26 @@ function buildDate(today, y, m, d, explicitYear) {
   return iso(dt)
 }
 
+var numberWords = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6,
+  seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12 }
+
+// "4 weeks from today", "in 3 days", "+2w", "a month from now" -> a date.
+function relativeDate(s, today) {
+  var m = s.match(/^(?:in )?(\+)?(\d{1,3} ?|[a-z]+ )(d|days?|w|wks?|weeks?|m|mos?|months?|y|yrs?|years?)?(?: (from today|from now|from tomorrow|later))?$/)
+  if (!m) return null
+  var word = m[2].trim()
+  var n = /^\d/.test(word) ? Number(word) : numberWords[word]
+  if (!n) return null
+  // A bare number only reads as days with a "+": "+3", not "3".
+  if (!m[3] && !m[1]) return null
+  var base = m[4] === "from tomorrow" ? addDays(today, 1) : today
+  var unit = m[3] ? m[3][0] : "d"
+  if (unit === "w") return addDays(base, 7 * n)
+  if (unit === "m") return addMonths(base, n)
+  if (unit === "y") return addMonths(base, 12 * n)
+  return addDays(base, n)
+}
+
 var monthNames = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
 var dayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"]
 
@@ -40,15 +71,19 @@ function monthIndex(word) {
 }
 
 // Loose date input -> "YYYY-MM-DD", "" for blank, or null if unreadable.
-// today, tomorrow, +3, +2w, fri, next fri, oct 20, 20 oct, 10/20, 2026-10-20
+// today, tomorrow, +3, +2w, 4 weeks from today, in 3 days, a month from now,
+// next week, next month, fri, next fri, oct 20, 20 oct, 10/20, 2026-10-20
 function parseDate(input, today) {
   var s = String(input || "").trim().toLowerCase().replace(/,/g, " ").replace(/\s+/g, " ")
   if (s === "") return ""
   if (s === "today" || s === "tod" || s === "now") return today
   if (/^(tomorrow|tom|tmr|tmrw)$/.test(s)) return addDays(today, 1)
-  var m = s.match(/^\+(\d{1,3}) ?(d|days?|w|wks?|weeks?)?$/)
-  if (m) return addDays(today, Number(m[1]) * (m[2] && m[2][0] === "w" ? 7 : 1))
-  m = s.match(/^(next )?([a-z]{3,})$/)
+  if (s === "next week") return addDays(today, 7)
+  if (s === "next month") return addMonths(today, 1)
+  if (s === "next year") return addMonths(today, 12)
+  var rel = relativeDate(s, today)
+  if (rel) return rel
+  var m = s.match(/^(next )?([a-z]{3,})$/)
   if (m) {
     for (var w = 0; w < 7; w++) {
       if (dayNames[w].indexOf(m[2]) === 0) {

@@ -187,7 +187,8 @@ Panel {
   function addDays(n) { return DateParse.addDays(today, n) }
 
   // Loose date input -> "YYYY-MM-DD", "" for blank, or null if unreadable.
-  // today, tomorrow, +3, +2w, fri, next fri, oct 20, 20 oct, 10/20, 2026-10-20
+  // today, tomorrow, +3, +2w, 4 weeks from today, in 3 days, a month from now,
+  // next week, next month, fri, next fri, oct 20, 20 oct, 10/20, 2026-10-20
   function parseDate(input) { return DateParse.parseDate(input, today) }
 
   function prettyDate(isoDate) {
@@ -1286,7 +1287,7 @@ Panel {
                   elide: Text.ElideRight
                   textFormat: Text.PlainText
                   text: root.dueParsed === null ? "Not a date I know"
-                      : root.dueParsed === "" ? "fri, +3, oct 20, 10/20"
+                      : root.dueParsed === "" ? "fri, in 2 weeks, oct 20"
                       : root.prettyDate(root.dueParsed)
                   color: root.dueParsed === null ? root.urgent : root.dueParsed === "" ? root.faint : Color.accent
                   font.family: root.fontFamily

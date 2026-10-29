@@ -10,7 +10,8 @@ First public release.
 - Panel: Today / Tomorrow / Week / Month (next 31 days) tabs, overdue first,
   priority dots and project names, pages with pager, wheel and keys. Click the
   circle to mark a task done; click again to undo.
-- Quick add with natural dates (`fri`, `+3`, `oct 20`), a project search and
+- Quick add with natural dates (`fri`, `+3`, `oct 20`, `4 weeks from today`,
+  `in 3 days`, `next month`), a project search and
   "+ New project".
 - Works with any Airtable table: `upnext setup` reads the base's schema and
   matches name, status, due date, priority, start date and project fields.

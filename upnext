@@ -1,0 +1,696 @@
+#!/bin/bash
+# Airtable bridge for the Up Next bar widget.
+#
+#   upnext setup                  guided first run: token, base, table, fields, plan
+#   upnext fetch                  open tasks that have a due date
+#   upnext set <recId> <status>   change one task's status
+#   upnext projects               projects that aren't done, with their client
+#   upnext add <name> <projectRecId|-> <start|-> <due> [status]
+#                                 create a task (dates YYYY-MM-DD)
+#   upnext newproject <name>      create a project, starting today
+#   upnext config                 what the widget needs to know about the mapping
+#   upnext plan free|team         change the sync profile without running setup
+#   upnext usage                  API calls Up Next made this month
+#   upnext url [recId]            the table's (or a record's) Airtable URL
+#   upnext forget                 remove the token and the config
+#
+# Every command except setup and forget prints one JSON object:
+# {"ok":true,...} or {"ok":false,"error":"<code>","message":"..."}, and exits 0,
+# so the widget only ever parses stdout.
+#
+# The token is an Airtable personal access token in the desktop keyring
+# (libsecret). It reaches curl through /dev/fd, never through process
+# arguments, so other local users can't read it from /proc.
+
+set -o pipefail
+
+CONFIG=${UPNEXT_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/upnext/config.json}
+STATE=${UPNEXT_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/upnext}
+API=https://api.airtable.com/v0
+KEYRING=(service airtable account io.github.steveb98.upnext)
+FREE_MONTHLY=1000
+
+ID_RE='^[A-Za-z0-9]{17}$'
+DATE_RE='^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+
+fail() { jq -cn --arg e "$1" --arg m "$2" '{ok:false,error:$e,message:$m}'; exit 0; }
+
+# ------------------------------------------------------------------ config
+
+# cfg '<jq filter>' reads from the config; -r output.
+cfg() { jq -r "$1 // empty" "$CONFIG"; }
+
+load_config() {
+  [ -r "$CONFIG" ] || fail no-config "Up Next isn't set up yet"
+  jq -e '.version == 1 and (.baseId|test("^app")) and (.tableId|test("^tbl"))' "$CONFIG" >/dev/null 2>&1 \
+    || fail no-config "Up Next's config is damaged; run setup again"
+  BASE=$(cfg .baseId)
+  TABLE=$(cfg .tableId)
+  [[ $BASE =~ $ID_RE && $TABLE =~ $ID_RE ]] || fail no-config "Up Next's config has a bad base or table id"
+}
+
+# Rewrite the config through jq without loosening its permissions.
+update_config() {
+  local tmp
+  tmp=$(mktemp "${CONFIG}.XXXXXX") || return 1
+  if jq "$@" "$CONFIG" > "$tmp"; then mv "$tmp" "$CONFIG"; else rm -f "$tmp"; return 1; fi
+}
+
+# ------------------------------------------------------------------ usage
+
+month() { date +%Y-%m; }
+
+# Count one API call against this base for the current month.
+count_call() {
+  [ -n "$BASE" ] || return 0
+  { mkdir -p "$STATE" && chmod 700 "$STATE"; } 2>/dev/null || return 0
+  local f="$STATE/usage.json"
+  (
+    flock -w 2 9 || exit 0
+    local cur='{}'
+    [ -s "$f" ] && cur=$(cat "$f")
+    jq -c --arg m "$(month)" --arg b "$BASE" '
+      (if .month == $m then . else {month:$m, calls:{}} end)
+      | .calls[$b] = ((.calls[$b] // 0) + 1)' <<<"$cur" > "$f.tmp" 2>/dev/null && mv "$f.tmp" "$f"
+  ) 9>"$STATE/usage.lock"
+}
+
+calls_this_month() {
+  local f="$STATE/usage.json"
+  [ -s "$f" ] || { echo 0; return; }
+  jq -r --arg m "$(month)" --arg b "${BASE:-}" 'if .month == $m then (.calls[$b] // 0) else 0 end' "$f" 2>/dev/null || echo 0
+}
+
+# ------------------------------------------------------------------ http
+
+token() {
+  TOKEN=$(secret-tool lookup "${KEYRING[@]}" 2>/dev/null)
+  [ -n "$TOKEN" ] || fail no-token "No Airtable token in the keyring"
+}
+
+# Free plan's monthly cap: switch this install to the light profile.
+hit_monthly_limit() {
+  [ -w "$CONFIG" ] && update_config '.plan = "free" | .planSource = "billing-error"' 2>/dev/null
+  fail monthly-limit "Airtable's monthly API limit for this workspace is used up"
+}
+
+# curl wrapper: sets $BODY and $CODE, maps errors to {ok:false} and exits.
+call() {
+  local out
+  count_call
+  out=$(curl -sS --max-time 20 -w '\n%{http_code}' \
+    -H @<(printf 'Authorization: Bearer %s\n' "$TOKEN") "$@" 2>&1) \
+    || fail network "Can't reach Airtable"
+  CODE=${out##*$'\n'}
+  BODY=${out%$'\n'*}
+  local type
+  type=$(jq -r '.error.type // .error // empty' <<<"$BODY" 2>/dev/null)
+  case $CODE in
+    2??) ;;
+    401) fail auth "Airtable rejected the token" ;;
+    403) fail access "The token can't use this base (check its scopes and access)" ;;
+    404) fail access "Airtable can't find the base or table (was it deleted, or is it outside the token's access?)" ;;
+    422) [ "${ALLOW_422:-}" = 1 ] && return 0
+         fail http "Airtable said: $(jq -r '.error.message // .error.type // .error // empty' <<<"$BODY" 2>/dev/null)" ;;
+    429) [[ $type == *BILLING* ]] && hit_monthly_limit
+         fail rate "Airtable rate limit, retrying soon" ;;
+    *) fail http "Airtable error $CODE: $(jq -r '.error.message // .error.type // .error // empty' <<<"$BODY" 2>/dev/null)" ;;
+  esac
+}
+
+# ------------------------------------------------------------------ formulas
+
+# Formulas take field names, not ids. Escape them for {Field} and 'string'.
+formula() {
+  jq -r '
+    def ref: "{" + (gsub("\\\\"; "\\\\") | gsub("}"; "\\}")) + "}";
+    def str: $q + (gsub("\\\\"; "\\\\") | gsub($q; "\\" + $q)) + $q;
+    .fields as $f
+    | "AND(OR(" + ([.statuses.open[] | ($f.status.name|ref) + "=" + str] | join(",")) + "),"
+      + ($f.due.name|ref) + ")"' --arg q "'" "$CONFIG"
+}
+
+project_formula() {
+  jq -r '
+    def ref: "{" + (gsub("\\\\"; "\\\\") | gsub("}"; "\\}")) + "}";
+    def str: $q + (gsub("\\\\"; "\\\\") | gsub($q; "\\" + $q)) + $q;
+    .projects as $p
+    | if ($p.status == null or ($p.doneStatuses|length) == 0) then ""
+      else "NOT(OR(" + ([$p.doneStatuses[] | ($p.status.name|ref) + "=" + str] | join(",")) + "))" end' --arg q "'" "$CONFIG"
+}
+
+# A field was renamed in Airtable: pick up the new names by id, once.
+refresh_names() {
+  call "$API/meta/bases/$BASE/tables"
+  local schema=$BODY
+  update_config --argjson s "$schema" '
+    ($s.tables | map({key:.id, value:(.fields | map({key:.id, value:.name}) | from_entries)}) | from_entries) as $n
+    | .tableId as $t
+    | .fields |= with_entries(if .value == null then . else .value.name = ($n[$t][.value.id] // .value.name) end)
+    | if .projects == null then . else
+        .projects.tableId as $pt
+        | .projects |= with_entries(if (.value|type) == "object" and (.value.id? // null) != null
+                                     then .value.name = ($n[$pt][.value.id] // .value.name) else . end)
+      end'
+}
+
+# ------------------------------------------------------------------ commands
+
+fetch() {
+  load_config
+  token
+  local f_name f_due f_status f_prio f_proj f_label
+  f_name=$(cfg .fields.name.id); f_due=$(cfg .fields.due.id); f_status=$(cfg .fields.status.id)
+  f_prio=$(cfg .fields.priority.id); f_proj=$(cfg .fields.project.id); f_label=$(cfg .fields.projectLabel.id)
+
+  local attempt
+  for attempt in 1 2; do
+    local offset="" pages="[]" retry=""
+    while :; do
+      local args=(-G "$API/$BASE/$TABLE"
+        --data-urlencode "filterByFormula=$(formula)"
+        --data-urlencode "returnFieldsByFieldId=true"
+        --data-urlencode "pageSize=100"
+        --data-urlencode "cellFormat=json")
+      local fld
+      for fld in "$f_name" "$f_due" "$f_status" "$f_prio" "$f_proj" "$f_label"; do
+        [ -n "$fld" ] && args+=(--data-urlencode "fields[]=$fld")
+      done
+      [ -n "$offset" ] && args+=(--data-urlencode "offset=$offset")
+      ALLOW_422=1 call "${args[@]}"
+      if [ "$CODE" = 422 ]; then retry=1; break; fi
+      pages=$(jq -c --argjson acc "$pages" '$acc + .records' <<<"$BODY")
+      offset=$(jq -r '.offset // empty' <<<"$BODY")
+      [ -n "$offset" ] || break
+    done
+    if [ -z "$retry" ]; then break; fi
+    [ "$attempt" = 2 ] && fail config "A mapped field or status no longer matches the base; run setup again"
+    refresh_names || fail config "A mapped field changed; run setup again"
+  done
+
+  # Linked projects show by name: from a lookup field if the table has one,
+  # otherwise from the cached project list.
+  local names='{}'
+  if [ -n "$f_proj" ] && [ -z "$f_label" ]; then
+    names=$(project_names "$pages")
+  fi
+
+  jq -c --arg n "$f_name" --arg d "$f_due" --arg s "$f_status" --arg r "$f_prio" \
+    --arg p "$f_proj" --arg l "$f_label" --argjson names "$names" \
+    --arg plan "$(cfg .plan)" --argjson calls "$(calls_this_month)" '
+    {ok:true, fetchedAt:(now|floor), plan:$plan, calls:$calls, tasks:[ .[] | {
+      id,
+      name: (.fields[$n] // "Untitled" | tostring),
+      project: (if $l != "" then ((.fields[$l] // []) | map(tostring) | join(", "))
+                elif $p != "" then ((.fields[$p] // []) | map($names[.] // empty) | join(", "))
+                else "" end),
+      # Date fields are YYYY-MM-DD; dateTime fields are UTC, so convert to local.
+      due: (.fields[$d] // "" | tostring
+            | if length > 10 then (sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601 | localtime | strftime("%Y-%m-%d"))
+              else . end),
+      status: (.fields[$s] // "" | if type == "object" then .name else tostring end),
+      priority: (if $r == "" then "" else (.fields[$r] // "" | if type == "object" then .name else tostring end) end)
+    } | select(.due | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")) ]}' <<<"$pages"
+}
+
+# id -> project name for every project the tasks link to. The names are
+# cached; the list is fetched again only when an unknown id shows up and the
+# cache is older than PROJECT_TTL seconds (light profile: an hour).
+project_names() {
+  local pages=$1 cache="$STATE/projects-$BASE.json"
+  local ttl=60
+  [ "$(cfg .plan)" = free ] && ttl=3600
+  local want
+  want=$(jq -c --arg p "$(cfg .fields.project.id)" '[.[] | .fields[$p][]?] | unique' <<<"$pages")
+  local have='{}' age=999999
+  if [ -s "$cache" ]; then
+    have=$(jq -c '.names // {}' "$cache" 2>/dev/null || echo '{}')
+    age=$(( $(date +%s) - $(jq -r '.at // 0' "$cache" 2>/dev/null || echo 0) ))
+  fi
+  local missing
+  missing=$(jq -n --argjson w "$want" --argjson h "$have" '[$w[] | select($h[.] == null)] | length')
+  if [ "$missing" -gt 0 ] && [ "$age" -ge "$ttl" ]; then
+    local tbl pn offset="" all="[]"
+    tbl=$(cfg .projects.tableId); pn=$(cfg .projects.name.id)
+    if [[ $tbl =~ $ID_RE ]] && [ -n "$pn" ]; then
+      while :; do
+        local args=(-G "$API/$BASE/$tbl" --data-urlencode "returnFieldsByFieldId=true"
+          --data-urlencode "pageSize=100" --data-urlencode "fields[]=$pn")
+        [ -n "$offset" ] && args+=(--data-urlencode "offset=$offset")
+        call "${args[@]}"
+        all=$(jq -c --argjson acc "$all" '$acc + .records' <<<"$BODY")
+        offset=$(jq -r '.offset // empty' <<<"$BODY")
+        [ -n "$offset" ] || break
+      done
+      have=$(jq -c --arg pn "$pn" 'map({key:.id, value:(.fields[$pn] // "" | tostring)}) | from_entries' <<<"$all")
+      mkdir -p "$STATE" && chmod 700 "$STATE"
+      jq -cn --argjson n "$have" '{at:(now|floor), names:$n}' > "$cache"
+    fi
+  fi
+  echo "$have"
+}
+
+set_status() {
+  [[ $1 =~ ^rec[A-Za-z0-9]{14}$ ]] || fail args "Bad record id"
+  load_config
+  jq -e --arg s "$2" '(.statuses.open + [.statuses.done]) | index($s)' "$CONFIG" >/dev/null \
+    || fail args "That status isn't one Up Next manages"
+  token
+  call -X PATCH "$API/$BASE/$TABLE/$1" -H "Content-Type: application/json" \
+    --data "$(jq -cn --arg f "$(cfg .fields.status.id)" --arg s "$2" '{fields:{($f):$s}}')"
+  jq -cn --arg id "$1" --arg s "$2" '{ok:true,id:$id,status:$s}'
+}
+
+projects() {
+  load_config
+  local tbl pn pc ps
+  tbl=$(cfg .projects.tableId)
+  [[ $tbl =~ $ID_RE ]] || fail no-projects "No projects table is mapped"
+  pn=$(cfg .projects.name.id); pc=$(cfg .projects.client.id); ps=$(cfg .projects.status.id)
+  token
+  # cellFormat=string turns a linked client into its name.
+  local filter offset="" pages="[]"
+  filter=$(project_formula)
+  while :; do
+    local args=(-G "$API/$BASE/$tbl"
+      --data-urlencode "returnFieldsByFieldId=true"
+      --data-urlencode "cellFormat=string"
+      --data-urlencode "timeZone=$(time_zone)"
+      --data-urlencode "userLocale=$(user_locale)"
+      --data-urlencode "fields[]=$pn")
+    [ -n "$filter" ] && args+=(--data-urlencode "filterByFormula=$filter")
+    [ -n "$pc" ] && args+=(--data-urlencode "fields[]=$pc")
+    [ -n "$ps" ] && args+=(--data-urlencode "fields[]=$ps")
+    [ -n "$offset" ] && args+=(--data-urlencode "offset=$offset")
+    call "${args[@]}"
+    pages=$(jq -c --argjson acc "$pages" '$acc + .records' <<<"$BODY")
+    offset=$(jq -r '.offset // empty' <<<"$BODY")
+    [ -n "$offset" ] || break
+  done
+  jq -c --arg n "$pn" --arg c "$pc" --arg s "$ps" '
+    {ok:true, projects:([ .[] | select((.fields[$n] // "") != "") | {
+      id, name: .fields[$n],
+      client: (if $c == "" then "" else (.fields[$c] // "") end),
+      status: (if $s == "" then "" else (.fields[$s] // "") end)
+    } ] | sort_by(.name | ascii_downcase))}' <<<"$pages"
+}
+
+add_task() {
+  local name=$1 project=$2 start=$3 due=$4 status=$5
+  [ -n "${name// /}" ] || fail args "Task needs a name"
+  [[ $due =~ $DATE_RE ]] || fail args "Due date must be YYYY-MM-DD"
+  [ "$start" = "-" ] || [ -z "$start" ] || [[ $start =~ $DATE_RE ]] || fail args "Start date must be YYYY-MM-DD"
+  [ "$project" = "-" ] || [ -z "$project" ] || [[ $project =~ ^rec[A-Za-z0-9]{14}$ ]] || fail args "Bad project id"
+  load_config
+  [ -n "$status" ] || status=$(cfg .statuses.new)
+  token
+  local body
+  body=$(jq -c --arg name "$name" --arg project "${project:--}" --arg start "${start:--}" --arg due "$due" \
+    --arg status "$status" '
+    .fields as $f
+    | {fields:(
+        {($f.name.id): $name, ($f.due.id): $due, ($f.status.id): $status}
+        + (if $start == "-" or $f.start == null then {} else {($f.start.id): $start} end)
+        + (if $project == "-" or $f.project == null then {} else {($f.project.id): [$project]} end)
+      )}' "$CONFIG")
+  call -X POST "$API/$BASE/$TABLE" -H "Content-Type: application/json" --data "$body"
+  jq -c '{ok:true, id}' <<<"$BODY"
+}
+
+new_project() {
+  local name=$1
+  [ -n "${name// /}" ] || fail args "Project needs a name"
+  load_config
+  local tbl
+  tbl=$(cfg .projects.tableId)
+  [[ $tbl =~ $ID_RE ]] || fail no-projects "No projects table is mapped"
+  token
+  local body
+  body=$(jq -c --arg name "$name" --arg today "$(date +%F)" '
+    .projects as $p
+    | {fields:(
+        {($p.name.id): $name}
+        + (if $p.status == null or ($p.newStatus // "") == "" then {} else {($p.status.id): $p.newStatus} end)
+        + (if $p.start == null then {} else {($p.start.id): $today} end)
+      )}' "$CONFIG")
+  call -X POST "$API/$BASE/$tbl" -H "Content-Type: application/json" --data "$body"
+  rm -f "$STATE/projects-$BASE.json"
+  jq -c --arg name "$name" '{ok:true, project:{id, name:$name, client:"", status:""}}' <<<"$BODY"
+}
+
+show_config() {
+  load_config
+  jq -c --argjson calls "$(calls_this_month)" --argjson cap $FREE_MONTHLY '{
+    ok: true,
+    tableUrl: ("https://airtable.com/" + .baseId + "/" + .tableId),
+    open: .statuses.open, done: .statuses.done, new: .statuses.new,
+    priorities: (.priorities // []),
+    projects: (.projects != null),
+    plan: (.plan // "free"), planSource: (.planSource // "setup"),
+    calls: $calls, freeMonthly: $cap
+  }' "$CONFIG"
+}
+
+set_plan() {
+  [[ $1 == free || $1 == team ]] || fail args "Plan must be free or team"
+  load_config
+  update_config --arg p "$1" '.plan = $p | .planSource = "user"' || fail config "Couldn't save the plan"
+  jq -cn --arg p "$1" '{ok:true, plan:$p}'
+}
+
+usage() {
+  load_config
+  jq -cn --arg m "$(month)" --argjson c "$(calls_this_month)" --arg plan "$(cfg .plan)" --argjson cap $FREE_MONTHLY \
+    '{ok:true, month:$m, calls:$c, plan:$plan, freeMonthly:$cap}'
+}
+
+record_url() {
+  load_config
+  if [ -z "$1" ]; then echo "https://airtable.com/$BASE/$TABLE"; return; fi
+  [[ $1 =~ ^rec[A-Za-z0-9]{14}$ ]] || fail args "Bad record id"
+  echo "https://airtable.com/$BASE/$TABLE/$1"
+}
+
+time_zone() {
+  local tz
+  tz=$(timedatectl show -p Timezone --value 2>/dev/null)
+  [ -n "$tz" ] || tz=${TZ#:}
+  [[ $tz =~ ^[A-Za-z_]+(/[A-Za-z0-9_+-]+)*$ ]] || tz=UTC
+  echo "$tz"
+}
+
+user_locale() {
+  local l=${LC_ALL:-${LC_TIME:-${LANG:-en_US}}}
+  l=${l%%.*}; l=${l//_/-}
+  [[ $l =~ ^[a-zA-Z]{2,3}(-[a-zA-Z]{2})?$ ]] || l=en-us
+  echo "${l,,}"
+}
+
+# ------------------------------------------------------------------ setup
+
+say() { if command -v gum >/dev/null; then gum style --foreground 2 "$*"; else printf '\n%s\n' "$*"; fi; }
+
+# choose "prompt" default-index item... -> prints the chosen item
+choose() {
+  local prompt=$1 def=$2; shift 2
+  if command -v gum >/dev/null && [ -t 0 ]; then
+    gum choose --header "$prompt" --selected "${@:def+1:1}" "$@"
+    return
+  fi
+  echo "$prompt" >&2
+  local i=1 item
+  for item in "$@"; do printf '  %d) %s\n' "$i" "$item" >&2; i=$((i + 1)); done
+  local pick
+  while :; do
+    read -r -p "Number [$((def + 1))]: " pick || return 1
+    pick=${pick:-$((def + 1))}
+    if [[ $pick =~ ^[0-9]+$ ]] && [ "$pick" -ge 1 ] && [ "$pick" -le $# ]; then
+      printf '%s\n' "${@:pick:1}"
+      return
+    fi
+  done
+}
+
+# choose_many "prompt" "default items, newline separated" item... -> chosen items, one per line
+choose_many() {
+  local prompt=$1 defs=$2; shift 2
+  if command -v gum >/dev/null && [ -t 0 ]; then
+    local sel=()
+    local d
+    while IFS= read -r d; do [ -n "$d" ] && sel+=(--selected "$d"); done <<<"$defs"
+    gum choose --no-limit --header "$prompt (space to toggle, enter to accept)" "${sel[@]}" "$@"
+    return
+  fi
+  echo "$prompt" >&2
+  local i=1 item marks=()
+  for item in "$@"; do
+    if grep -Fxq -- "$item" <<<"$defs"; then marks+=("$i"); fi
+    printf '  %d) %s\n' "$i" "$item" >&2
+    i=$((i + 1))
+  done
+  local pick
+  read -r -p "Numbers, space separated [${marks[*]}]: " pick || return 1
+  pick=${pick:-${marks[*]}}
+  local n
+  for n in $pick; do
+    [[ $n =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ] && [ "$n" -le $# ] && printf '%s\n' "${@:n:1}"
+  done
+}
+
+# Index of the first item matching a regex (case-insensitive), else $3.
+first_match() {
+  local re=$1 fallback=$2; shift 2
+  local i=0 item
+  for item in "$@"; do
+    if [[ ${item,,} =~ $re ]]; then echo "$i"; return; fi
+    i=$((i + 1))
+  done
+  echo "$fallback"
+}
+
+# pick_field <label> <regex> <optional:0|1> <jq type filter> -> {"id","name"} or null
+pick_field() {
+  local label=$1 re=$2 optional=$3 types=$4 tbl=${5:-$TABLE_JSON}
+  local names ids
+  mapfile -t names < <(jq -r ".fields[] | select($types) | .name" <<<"$tbl")
+  mapfile -t ids < <(jq -r ".fields[] | select($types) | .id" <<<"$tbl")
+  if [ ${#names[@]} -eq 0 ]; then
+    [ "$optional" = 1 ] && { echo null; return; }
+    echo "This table has no field that can be the $label." >&2
+    return 1
+  fi
+  local opts=("${names[@]}") def
+  def=$(first_match "$re" -1 "${names[@]}")
+  if [ "$optional" = 1 ]; then
+    opts+=("(none)")
+    [ "$def" = -1 ] && def=${#names[@]}
+  else
+    [ "$def" = -1 ] && def=0
+  fi
+  local pick
+  pick=$(choose "$label:" "$def" "${opts[@]}") || return 1
+  [ "$pick" = "(none)" ] && { echo null; return; }
+  local i
+  for i in "${!names[@]}"; do
+    if [ "${names[$i]}" = "$pick" ]; then
+      jq -cn --arg id "${ids[$i]}" --arg n "$pick" '{id:$id, name:$n}'
+      return
+    fi
+  done
+  return 1
+}
+
+choices_of() { # <table json> <field id>
+  jq -r --arg f "$2" '.fields[] | select(.id == $f) | .options.choices[]?.name' <<<"$1"
+}
+
+setup() {
+  # In the terminal, errors are a readable line, and the window stays open.
+  fail() { echo; echo "Airtable: $2" >&2; read -r -p "Press Enter to close. " _; exit 1; }
+
+  echo
+  say "Up Next setup (about 2 minutes)"
+  cat <<'EOF'
+
+Up Next shows tasks from an Airtable table in your bar. It needs:
+  - an Airtable personal access token (it stays in your desktop keyring), and
+  - a table with a name, a status (single select) and a due date.
+
+No table yet? Copy the template base first: see the README's Quick start.
+EOF
+
+  # ---- token
+  local existing keep=n
+  existing=$(secret-tool lookup "${KEYRING[@]}" 2>/dev/null)
+  if [ -n "$existing" ]; then
+    read -r -p "A token is already saved. Keep it? [Y/n] " keep || return 1
+    [[ ${keep:-y} =~ ^[Yy] ]] && keep=y
+  fi
+  if [ "$keep" != y ]; then
+    echo
+    say "1. Create a token"
+    cat <<'EOF'
+Your browser will open Airtable's token page. Create a token with:
+  Scopes:  data.records:read   data.records:write   schema.bases:read
+  Access:  the base that holds your tasks (nothing else is needed)
+EOF
+    read -r -p "Press Enter to open the token page... " || return 1
+    xdg-open "https://airtable.com/create/tokens/new" >/dev/null 2>&1 &
+    local tok
+    while :; do
+      read -r -s -p "Paste the token (input is hidden): " tok || { echo; return 1; }
+      echo
+      tok=$(tr -d ' \t\r\n' <<<"$tok")
+      [[ $tok =~ ^pat[A-Za-z0-9]+\.[A-Za-z0-9]+$ ]] && break
+      echo "That doesn't look like an Airtable token (it starts with \"pat\"). Try again."
+    done
+    printf '%s' "$tok" | secret-tool store --label="Airtable (Up Next)" "${KEYRING[@]}" \
+      || { echo "Couldn't save the token in the keyring."; return 1; }
+    unset tok
+    echo "Token saved in the keyring."
+  fi
+  token
+
+  call "$API/meta/whoami"
+  local who=$BODY
+  if ! jq -e '(.scopes // []) as $s | ["data.records:read","data.records:write","schema.bases:read"] | all(. as $x | $s | index($x))' <<<"$who" >/dev/null; then
+    echo "This token is missing a scope. It needs data.records:read, data.records:write and schema.bases:read."
+    echo "Edit it on https://airtable.com/create/tokens, then run setup again."
+    return 1
+  fi
+
+  # ---- base
+  echo
+  say "2. Pick the base"
+  local bases
+  call "$API/meta/bases"
+  bases=$BODY
+  local bnames bids
+  mapfile -t bnames < <(jq -r '.bases[].name' <<<"$bases")
+  mapfile -t bids < <(jq -r '.bases[].id' <<<"$bases")
+  [ ${#bids[@]} -gt 0 ] || { echo "The token can't see any bases. Give it access to your tasks base."; return 1; }
+  local bpick def i
+  def=$(first_match 'task|up next|todo' 0 "${bnames[@]}")
+  bpick=$(choose "Base:" "$def" "${bnames[@]}") || return 1
+  for i in "${!bnames[@]}"; do [ "${bnames[$i]}" = "$bpick" ] && BASE=${bids[$i]}; done
+  [[ $BASE =~ $ID_RE ]] || return 1
+
+  # ---- table
+  local schema tnames tids tpick
+  call "$API/meta/bases/$BASE/tables"
+  schema=$BODY
+  mapfile -t tnames < <(jq -r '.tables[].name' <<<"$schema")
+  mapfile -t tids < <(jq -r '.tables[].id' <<<"$schema")
+  def=$(first_match 'task|todo|to-do' 0 "${tnames[@]}")
+  tpick=$(choose "Table with your tasks:" "$def" "${tnames[@]}") || return 1
+  for i in "${!tnames[@]}"; do [ "${tnames[$i]}" = "$tpick" ] && TABLE=${tids[$i]}; done
+  TABLE_JSON=$(jq -c --arg t "$TABLE" '.tables[] | select(.id == $t)' <<<"$schema")
+
+  # ---- fields
+  echo
+  say "3. Match the fields"
+  echo "The best guesses are preselected. Press Enter to accept each one."
+  local f_name f_due f_status f_prio f_start f_proj
+  local primary
+  primary=$(jq -r '.primaryFieldId' <<<"$TABLE_JSON")
+  f_name=$(pick_field "Task name" "^(name|task|title)" 0 '.id == "'"$primary"'" or .type == "singleLineText" or .type == "formula"') || return 1
+  f_due=$(pick_field "Due date" 'due|end|deadline' 0 '.type == "date" or .type == "dateTime"') || return 1
+  f_status=$(pick_field "Status (single select)" 'status|state|stage' 0 '.type == "singleSelect"') || return 1
+  f_prio=$(pick_field "Priority (optional)" 'priority|importance' 1 '.type == "singleSelect" and .id != "'"$(jq -r .id <<<"$f_status")"'"') || return 1
+  f_start=$(pick_field "Start date (optional)" 'start|begin' 1 '(.type == "date" or .type == "dateTime") and .id != "'"$(jq -r .id <<<"$f_due")"'"') || return 1
+  f_proj=$(pick_field "Project link (optional)" 'project|client|job' 1 '.type == "multipleRecordLinks"') || return 1
+
+  # ---- statuses
+  local statuses open done_status new
+  mapfile -t statuses < <(choices_of "$TABLE_JSON" "$(jq -r .id <<<"$f_status")")
+  [ ${#statuses[@]} -gt 1 ] || { echo "The status field needs at least two options (for example Next and Done)."; return 1; }
+  local closed_re='done|complete|finish|cancel|archiv|closed|drop|won.?t'
+  local s defs=""
+  for s in "${statuses[@]}"; do [[ ${s,,} =~ $closed_re ]] || defs+="$s"$'\n'; done
+  open=$(choose_many "Which statuses count as open (shown in the list)?" "$defs" "${statuses[@]}") || return 1
+  [ -n "$open" ] || { echo "Pick at least one open status."; return 1; }
+  done_status=$(choose "Which status means done (set when you tick a task)?" "$(first_match 'done|complete|finish' $(( ${#statuses[@]} - 1 )) "${statuses[@]}")" "${statuses[@]}") || return 1
+  local openarr
+  mapfile -t openarr <<<"$open"
+  new=$(choose "Status for new tasks:" "$(first_match 'next|to ?do|not started|backlog' 0 "${openarr[@]}")" "${openarr[@]}") || return 1
+
+  local prios='[]'
+  [ "$f_prio" != null ] && prios=$(choices_of "$TABLE_JSON" "$(jq -r .id <<<"$f_prio")" | jq -Rsc 'split("\n") | map(select(. != ""))')
+
+  # ---- projects
+  local projects=null label=null
+  if [ "$f_proj" != null ]; then
+    local linked ptable pprimary
+    linked=$(jq -r --arg f "$(jq -r .id <<<"$f_proj")" '.fields[] | select(.id == $f) | .options.linkedTableId' <<<"$TABLE_JSON")
+    ptable=$(jq -c --arg t "$linked" '.tables[] | select(.id == $t)' <<<"$schema")
+    pprimary=$(jq -r '.primaryFieldId' <<<"$ptable")
+    # A lookup of the project's name on the tasks table saves an API call per refresh.
+    label=$(jq -c --arg l "$(jq -r .id <<<"$f_proj")" --arg p "$pprimary" '
+      [.fields[] | select(.type == "multipleLookupValues" and .options.recordLinkFieldId == $l
+                          and .options.fieldIdInLinkedTable == $p) | {id, name}] | first // null' <<<"$TABLE_JSON")
+    echo
+    say "4. Projects ($(jq -r .name <<<"$ptable") table)"
+    local p_name p_client p_status p_start
+    p_name=$(jq -c --arg p "$pprimary" '.fields[] | select(.id == $p) | {id, name}' <<<"$ptable")
+    p_client=$(pick_field "Client shown next to each project (optional)" 'client|customer|company|account' 1 '.type != "button" and .type != "attachment"' "$ptable") || return 1
+    p_status=$(pick_field "Project status (optional; hides finished projects)" 'status|state|stage' 1 '.type == "singleSelect"' "$ptable") || return 1
+    p_start=$(pick_field "Project start date (optional; new projects start today)" 'start|begin' 1 '.type == "date" or .type == "dateTime"' "$ptable") || return 1
+    local pdone='[]' pnew=""
+    if [ "$p_status" != null ]; then
+      local pst pdefs=""
+      mapfile -t pst < <(choices_of "$ptable" "$(jq -r .id <<<"$p_status")")
+      for s in "${pst[@]}"; do [[ ${s,,} =~ $closed_re ]] && pdefs+="$s"$'\n'; done
+      pdone=$(choose_many "Which project statuses mean finished (hidden from the picker)?" "$pdefs" "${pst[@]}" | jq -Rsc 'split("\n") | map(select(. != ""))') || return 1
+      pnew=$(choose "Status for projects created from the panel:" "$(first_match 'progress|active|open|current' 0 "${pst[@]}")" "${pst[@]}") || return 1
+    fi
+    projects=$(jq -cn --arg t "$linked" --argjson n "$p_name" --argjson c "$p_client" --argjson s "$p_status" \
+      --argjson st "$p_start" --argjson d "$pdone" --arg new "$pnew" \
+      '{tableId:$t, name:$n, client:$c, status:$s, start:$st, doneStatuses:$d, newStatus:$new}')
+  fi
+
+  # ---- plan
+  echo
+  say "5. Your Airtable plan"
+  cat <<'EOF'
+Airtable's Free plan allows 1,000 API calls per workspace each month, shared
+by every tool connected to it. Up Next adapts:
+  Team or higher: live sync, refreshing every 5 minutes.
+  Free:           light sync, every 30 minutes and when you open the panel.
+You can see the plan in Airtable under the workspace's Billing settings.
+If Airtable ever reports the monthly limit, Up Next switches to light sync.
+EOF
+  local plan
+  plan=$(choose "Which plan is this base's workspace on?" 2 "Team or higher" "Free" "Not sure (use light sync)") || return 1
+  case $plan in Team*) plan=team ;; *) plan=free ;; esac
+
+  # ---- write
+  local dir
+  dir=$(dirname "$CONFIG")
+  mkdir -p "$dir" && chmod 700 "$dir"
+  local tmp
+  tmp=$(umask 077; mktemp "$CONFIG.XXXXXX")
+  jq -n --arg b "$BASE" --arg t "$TABLE" \
+    --argjson fn "$f_name" --argjson fd "$f_due" --argjson fs "$f_status" --argjson fp "$f_prio" \
+    --argjson fst "$f_start" --argjson fl "$f_proj" --argjson lab "$label" \
+    --arg open "$open" --arg doneStatus "$done_status" --arg new "$new" --argjson prios "$prios" \
+    --argjson projects "$projects" --arg plan "$plan" '{
+      version: 1, baseId: $b, tableId: $t,
+      fields: {name:$fn, due:$fd, status:$fs, priority:$fp, start:$fst, project:$fl, projectLabel:$lab},
+      statuses: {open: ($open | split("\n") | map(select(. != ""))), done:$doneStatus, new:$new},
+      priorities: $prios, projects: $projects, plan: $plan, planSource: "setup"
+    }' > "$tmp" && mv "$tmp" "$CONFIG"
+  chmod 600 "$CONFIG"
+  rm -f "$STATE"/projects-*.json
+
+  echo
+  local result
+  result=$("$0" fetch)
+  if jq -e .ok <<<"$result" >/dev/null; then
+    say "Done. $(jq -r '.tasks | length' <<<"$result") open tasks with a due date. Open the Up Next widget in your bar."
+  else
+    echo "Saved, but the test fetch failed: $(jq -r .message <<<"$result")"
+    return 1
+  fi
+}
+
+forget() {
+  secret-tool clear "${KEYRING[@]}" 2>/dev/null
+  rm -f "$CONFIG"
+  rm -rf "$STATE"
+  echo "Removed Up Next's token, config and cache."
+}
+
+case $1 in
+  fetch) fetch ;;
+  set) set_status "$2" "$3" ;;
+  projects) projects ;;
+  add) add_task "$2" "$3" "$4" "$5" "$6" ;;
+  newproject) new_project "$2" ;;
+  config) show_config ;;
+  plan) set_plan "$2" ;;
+  usage) usage ;;
+  url) record_url "$2" ;;
+  setup) setup || { echo; echo "Setup didn't finish. Run it again any time: $0 setup"; read -r -p "Press Enter to close. " _; exit 1; } ;;
+  forget) forget ;;
+  *) echo "usage: upnext setup | fetch | set <recId> <status> | projects | add <name> <projectId|-> <start|-> <due> [status] | newproject <name> | config | plan free|team | usage | url [recId] | forget" >&2; exit 2 ;;
+esac

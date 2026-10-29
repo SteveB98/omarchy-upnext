@@ -1,0 +1,35 @@
+#!/bin/bash
+# Fake curl for the upnext tests. Logs its argv, checks the auth header file,
+# and answers from fixtures by method and URL. FAKE_CODE / FAKE_BODY force a reply.
+printf '%s\n' "$*" >> "$FAKE_DIR/argv.log"
+method=GET url="" data="" hdr=""
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  case ${args[i]} in
+    -X) method=${args[i+1]} ;;
+    -H) [[ ${args[i+1]} == @* ]] && hdr=$(cat "${args[i+1]#@}") ;;
+    --data) data=${args[i+1]} ;;
+    --data-urlencode) printf '%s\n' "${args[i+1]}" >> "$FAKE_DIR/params.log" ;;
+    https://*) url=${args[i]} ;;
+  esac
+done
+[ -n "$data" ] && printf '%s %s %s\n' "$method" "$url" "$data" >> "$FAKE_DIR/writes.log"
+if [[ $hdr != "Authorization: Bearer "* ]]; then printf '{"error":"no auth header"}\n401'; exit 0; fi
+if [ -n "$FAKE_CODE" ]; then printf '%s\n%s' "${FAKE_BODY:-{\}}" "$FAKE_CODE"; exit 0; fi
+F=$(dirname "$0")/../fixtures
+if [ -n "$FAKE_422_ONCE" ] && [ ! -e "$FAKE_DIR/422-sent" ] && [[ $url == */tblTestTasks00001 ]]; then
+  touch "$FAKE_DIR/422-sent"
+  printf '{"error":{"type":"INVALID_FILTER_BY_FORMULA","message":"Unknown field names: status"}}\n422'; exit 0
+fi
+case "$method $url" in
+  "GET https://api.airtable.com/v0/meta/whoami") body='{"id":"usrTest0000000001","scopes":["data.records:read","data.records:write","schema.bases:read"]}' ;;
+  "GET https://api.airtable.com/v0/meta/bases") body='{"bases":[{"id":"appTestBase000001","name":"Up Next Tasks","permissionLevel":"create"}]}' ;;
+  "GET https://api.airtable.com/v0/meta/bases/appTestBase000001/tables") body=$(cat "$F/schema.json") ;;
+  "GET https://api.airtable.com/v0/appTestBase000001/tblTestTasks00001") body=$(cat "$F/tasks.json") ;;
+  "GET https://api.airtable.com/v0/appTestBase000001/tblTestProjects01")
+    if grep -q '^cellFormat=string' "$FAKE_DIR/params.log" 2>/dev/null; then body=$(cat "$F/projects-open.json"); else body=$(cat "$F/projects-all.json"); fi ;;
+  PATCH*) body='{"id":"recTask0000000001","fields":{}}' ;;
+  POST*) body='{"id":"recNew00000000001","fields":{}}' ;;
+  *) printf '{"error":{"type":"NOT_FOUND"}}\n404'; exit 0 ;;
+esac
+printf '%s\n200' "$body"

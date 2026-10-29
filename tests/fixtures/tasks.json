@@ -1,0 +1,5 @@
+{"records":[
+ {"id":"recTask0000000001","fields":{"fldName0000000001":"Write README","fldDue00000000001":"2026-10-28","fldStatus00000001":"Next","fldPriority000001":"High","fldProject0000001":["recProj0000000001"]}},
+ {"id":"recTask0000000002","fields":{"fldName0000000002":"ignored","fldDue00000000001":"2026-10-30T23:30:00.000Z","fldStatus00000001":"Inbox"}},
+ {"id":"recTask0000000003","fields":{"fldName0000000001":"No due date","fldStatus00000001":"Inbox"}}
+]}

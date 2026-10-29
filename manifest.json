@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.steveb98.upnext",
+  "name": "Up Next",
+  "version": "1.0.0",
+  "author": "Steve B",
+  "license": "MIT",
+  "description": "Your Airtable tasks in the Omarchy bar: due today, tomorrow, this week and the next 31 days. Tick to complete, add tasks with natural dates, and a guided setup that maps any Airtable table. Works on Airtable's Free and Team plans.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Up Next",
+    "description": "Airtable tasks due soon, one-click completion and quick add.",
+    "category": "Productivity",
+    "aliases": [
+      "upnext",
+      "tasks",
+      "airtable",
+      "todo"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "maxRows": 5,
+      "syncMode": "Auto",
+      "refreshIntervalSec": 0,
+      "weekStart": "Monday"
+    },
+    "schema": [
+      {
+        "key": "maxRows",
+        "type": "integer",
+        "label": "Tasks per page",
+        "min": 1,
+        "max": 15,
+        "step": 1,
+        "defaultValue": 5
+      },
+      {
+        "key": "syncMode",
+        "type": "enum",
+        "label": "Sync",
+        "options": [
+          "Auto",
+          "Light",
+          "Live"
+        ],
+        "defaultValue": "Auto",
+        "description": "Auto follows the Airtable plan picked in setup: Live (every 5 minutes) for Team and up, Light (every 30 minutes) for Free, which allows 1,000 API calls a month per workspace."
+      },
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval override (seconds, 0 = automatic)",
+        "min": 0,
+        "max": 7200,
+        "step": 60,
+        "defaultValue": 0,
+        "description": "Live never refreshes more often than every 300 seconds, Light every 900."
+      },
+      {
+        "key": "weekStart",
+        "type": "enum",
+        "label": "Week starts on",
+        "options": [
+          "Monday",
+          "Sunday"
+        ],
+        "defaultValue": "Monday"
+      }
+    ]
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "baseId": "appTestBase000001",
+  "tableId": "tblTestTasks00001",
+  "fields": {
+    "name": {"id": "fldName0000000001", "name": "Name"},
+    "due": {"id": "fldDue00000000001", "name": "Due {date}"},
+    "status": {"id": "fldStatus00000001", "name": "Status"},
+    "priority": {"id": "fldPriority000001", "name": "Priority"},
+    "start": {"id": "fldStart000000001", "name": "Start"},
+    "project": {"id": "fldProject0000001", "name": "Project"},
+    "projectLabel": null
+  },
+  "statuses": {"open": ["Inbox", "Next", "Bob's \\ stuff"], "done": "Done", "new": "Next"},
+  "priorities": ["Urgent", "High", "Medium", "Low"],
+  "projects": {
+    "tableId": "tblTestProjects01",
+    "name": {"id": "fldPName000000001", "name": "Name"},
+    "client": {"id": "fldPClient0000001", "name": "Client"},
+    "status": {"id": "fldPStatus0000001", "name": "Status"},
+    "start": {"id": "fldPStart00000001", "name": "Start"},
+    "doneStatuses": ["Completed"],
+    "newStatus": "Active"
+  },
+  "plan": "team",
+  "planSource": "setup"
+}

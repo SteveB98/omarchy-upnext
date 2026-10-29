@@ -1,0 +1,2 @@
+# jq programs are written in single quotes on purpose.
+disable=SC2016

@@ -4,6 +4,7 @@
 #   upnext setup                  guided first run: token, base, table, fields, plan
 #   upnext fetch                  open tasks that have a due date
 #   upnext set <recId> <status>   change one task's status
+#   upnext delete <recId>         delete one task
 #   upnext projects               projects that aren't done, with their client
 #   upnext add <name> <projectRecId|-> <start|-> <due> [status]
 #                                 create a task (dates YYYY-MM-DD)
@@ -261,6 +262,14 @@ set_status() {
   call -X PATCH "$API/$BASE/$TABLE/$1" -H "Content-Type: application/json" \
     --data "$(jq -cn --arg f "$(cfg .fields.status.id)" --arg s "$2" '{fields:{($f):$s}}')"
   jq -cn --arg id "$1" --arg s "$2" '{ok:true,id:$id,status:$s}'
+}
+
+delete_task() {
+  [[ $1 =~ ^rec[A-Za-z0-9]{14}$ ]] || fail args "Bad record id"
+  load_config
+  token
+  call -X DELETE "$API/$BASE/$TABLE/$1"
+  jq -cn --arg id "$1" '{ok:true,id:$id,deleted:true}'
 }
 
 projects() {
@@ -702,6 +711,7 @@ forget() {
 case $1 in
   fetch) fetch ;;
   set) set_status "$2" "$3" ;;
+  delete) delete_task "$2" ;;
   projects) projects ;;
   add) add_task "$2" "$3" "$4" "$5" "$6" ;;
   newproject) new_project "$2" ;;
@@ -711,5 +721,5 @@ case $1 in
   url) record_url "$2" ;;
   setup) setup || { echo; echo "Setup didn't finish. Run it again any time: $0 setup"; read -r -p "Press Enter to close. " _; exit 1; } ;;
   forget) forget ;;
-  *) echo "usage: upnext setup | fetch | set <recId> <status> | projects | add <name> <projectId|-> <start|-> <due> [status] | newproject <name> | config | plan free|team | usage | url [recId] | forget" >&2; exit 2 ;;
+  *) echo "usage: upnext setup | fetch | set <recId> <status> | delete <recId> | projects | add <name> <projectId|-> <start|-> <due> [status] | newproject <name> | config | plan free|team | usage | url [recId] | forget" >&2; exit 2 ;;
 esac

@@ -93,6 +93,7 @@ To switch later without running setup again:
 | Middle-click the icon | Open straight into quick add |
 | Right-click the icon | Open your table in Airtable |
 | Click the circle on a task | Mark it done (click again to undo until the panel closes) |
+| Click the trash icon, then again | Delete the task (the first click only asks) |
 | Click anywhere else on a task | Open that task in Airtable |
 | Scroll over the list | Flip pages |
 
@@ -104,6 +105,7 @@ To switch later without running setup again:
 | `h` / `l`, `1`-`4` | Switch tabs |
 | `n` / `p`, `]` / `[` | Next / previous page |
 | `Space`, `Enter` | Mark done / undo |
+| `x` twice, or `Delete` twice | Delete the selected task |
 | `o` | Open the task in Airtable |
 | `a` | Open the table in Airtable |
 | `+` or `c` | Add a task |

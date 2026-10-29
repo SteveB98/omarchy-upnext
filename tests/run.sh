@@ -54,6 +54,13 @@ check "set refuses unknown statuses" '.ok == false and .error == "args"' "$("$UP
 check "set refuses bad record ids" '.ok == false and .error == "args"' "$("$UPNEXT" set 'rec;rm -rf' Done)"
 
 reset
+out=$("$UPNEXT" delete recTask0000000001)
+check "delete ok" '.ok and .deleted and .id == "recTask0000000001"' "$out"
+check "delete sends DELETE for that record" 'test("^DELETE https://api.airtable.com/v0/appTestBase000001/tblTestTasks00001/recTask0000000001\n$")' "$(jq -Rs . "$FAKE_DIR/writes.log")"
+check "delete refuses bad record ids" '.ok == false and .error == "args"' "$("$UPNEXT" delete 'rec;rm -rf')"
+check "delete reports Airtable errors" '.ok == false and .error == "access"' "$(FAKE_CODE=404 "$UPNEXT" delete recTask0000000001)"
+
+reset
 out=$("$UPNEXT" add "Ship it" recProj0000000001 2026-10-28 2026-11-02)
 check "add ok" '.ok and .id == "recNew00000000001"' "$out"
 body=$(sed -n 's/^POST [^ ]* //p' "$FAKE_DIR/writes.log")

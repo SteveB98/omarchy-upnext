@@ -8,7 +8,8 @@ import "DateParse.js" as DateParse
 // Up Next: upcoming tasks from an Airtable table.
 // The bar shows a checklist icon plus how many open tasks are due today or
 // overdue; the panel lists them under Today / Tomorrow / Week / Month tabs and
-// ticking one sets its status to the mapped "done" status in Airtable.
+// ticking one sets its status to the mapped "done" status in Airtable. The
+// trash icon (or x) deletes a task after a second click to confirm.
 //
 // All Airtable traffic goes through ./upnext (curl + jq, token from the
 // desktop keyring). `upnext setup` maps the table's fields and statuses into
@@ -41,6 +42,7 @@ Panel {
   readonly property string doneGlyph: String.fromCodePoint(0xF0133)
   readonly property string refreshGlyph: String.fromCodePoint(0xF0450)
   readonly property string addGlyph: String.fromCodePoint(0xF0415)
+  readonly property string deleteGlyph: String.fromCodePoint(0xF09E7)
 
   readonly property int maxRows: setting("maxRows", 5)
   readonly property int refreshIntervalSec: setting("refreshIntervalSec", 0)
@@ -79,7 +81,8 @@ Panel {
   property int cursor: 0
   property int page: 0
   property real rowHeight: 0   // measured from a delegate; all rows are one size
-  property var queue: []       // pending status changes: { id, status, prev }
+  property var queue: []       // pending writes: { id, status, prev } or { id, del, task }
+  property string armedId: ""  // task waiting for a second click (or x) to delete
 
   property string mode: "list" // "list" or "add"
   property string flash: ""    // brief confirmation shown in the header
@@ -473,18 +476,49 @@ Panel {
     pumpQueue()
   }
 
+  // Two steps so one stray click or key never deletes: the first arms the
+  // row, the second (within a few seconds, on the same task) deletes it.
+  // Optimistic like toggleDone: the row goes now and comes back on failure.
+  function deleteTask(task) {
+    if (!task) return
+    if (root.armedId !== task.id) {
+      root.armedId = task.id
+      armTimer.restart()
+      return
+    }
+    root.armedId = ""
+    root.tasks = root.tasks.filter(function(t) { return t.id !== task.id })
+    root.clampCursor()
+    root.flash = "Deleted: " + task.name
+    flashTimer.restart()
+    root.queue = root.queue.concat([{ id: task.id, del: true, task: task }])
+    pumpQueue()
+  }
+
+  Timer {
+    id: armTimer
+    interval: 4000
+    onTriggered: root.armedId = ""
+  }
+
   function pumpQueue() {
     if (setProc.running || queue.length === 0) return
     setProc.job = queue[0]
     root.queue = queue.slice(1)
-    setProc.command = [root.helper, "set", setProc.job.id, setProc.job.status]
+    setProc.command = setProc.job.del ? [root.helper, "delete", setProc.job.id]
+                                      : [root.helper, "set", setProc.job.id, setProc.job.status]
     setProc.running = true
   }
 
   function applySet(job, text) {
     var r
     try { r = JSON.parse(text) } catch (e) { r = { ok: false, message: "Unexpected reply from upnext" } }
-    if (!r.ok && job) {
+    if (!r.ok && job && job.del) {
+      root.tasks = root.tasks.concat([job.task])
+      root.flash = ""
+      root.errorCode = r.error || "unknown"
+      root.errorMessage = r.message || "Couldn't delete the task"
+    } else if (!r.ok && job) {
       root.tasks = root.tasks.map(function(t) {
         if (t.id !== job.id) return t
         return { id: t.id, name: t.name, project: t.project, due: t.due, priority: t.priority,
@@ -519,6 +553,7 @@ Panel {
   onOpenedChanged: {
     root.page = 0
     root.cursor = 0
+    root.armedId = ""
     if (root.opened) {
       root.loadConfig()
       if (root.configured) root.refreshIfStale()
@@ -547,6 +582,7 @@ Panel {
 
   // j/k past the edge of a page carries on into the next or previous one.
   function moveCursor(dy) {
+    root.armedId = ""
     var c = root.cursor + dy
     if (c >= root.shownTasks.length && root.page < root.pageCount - 1) {
       root.page++
@@ -645,10 +681,12 @@ Panel {
         if (root.needsSetup) root.runSetup()
         else root.toggleDone(root.shownTasks[root.cursor])
       }
+      onDeleteRequested: if (!root.needsSetup) root.deleteTask(root.shownTasks[root.cursor])
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
-        if (t === "o" || t === "O") root.openTask(root.shownTasks[root.cursor])
+        if (t === "\u007f") root.deleteTask(root.shownTasks[root.cursor])  // Delete key
+        else if (t === "o" || t === "O") root.openTask(root.shownTasks[root.cursor])
         else if (t === "a" || t === "A") root.openUrl(root.tableUrl)
         else if (t === "r" || t === "R") root.refresh()
         else if (t === "1") root.tab = "today"
@@ -848,7 +886,8 @@ Panel {
 
                 readonly property bool done: modelData.status === root.doneStatus
                 readonly property bool overdue: !done && modelData.due < root.today
-                readonly property bool hot: rowMouse.containsMouse || checkMouse.containsMouse || root.cursor === index
+                readonly property bool armed: root.armedId === modelData.id
+                readonly property bool hot: rowMouse.containsMouse || checkMouse.containsMouse || trashMouse.containsMouse || root.cursor === index
 
                 width: parent.width
                 height: rowContent.implicitHeight + Style.space(12)
@@ -896,7 +935,7 @@ Panel {
                   }
 
                   Column {
-                    width: parent.width - check.width - parent.spacing
+                    width: parent.width - check.width - trash.width - 2 * parent.spacing
                     anchors.verticalCenter: parent.verticalCenter
                     spacing: Style.space(2)
 
@@ -911,8 +950,21 @@ Panel {
                       elide: Text.ElideRight
                     }
 
+                    Text {
+                      width: parent.width
+                      visible: row.armed
+                      textFormat: Text.PlainText
+                      text: "Delete? Click again (or x)"
+                      color: root.urgent
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      font.bold: true
+                      elide: Text.ElideRight
+                    }
+
                     Row {
                       width: parent.width
+                      visible: !row.armed
                       spacing: Style.space(6)
                       opacity: row.done ? 0.6 : 1.0
 
@@ -948,6 +1000,29 @@ Panel {
                         font.pixelSize: Style.font.bodySmall
                         elide: Text.ElideRight
                       }
+                    }
+                  }
+
+                  // Shown on the hovered or selected row; keeps its width so
+                  // names don't shift when it appears.
+                  Text {
+                    id: trash
+                    anchors.verticalCenter: parent.verticalCenter
+                    textFormat: Text.PlainText
+                    text: root.deleteGlyph
+                    opacity: row.hot || row.armed ? 1.0 : 0.0
+                    color: row.armed || trashMouse.containsMouse ? root.urgent : root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.iconLarge
+
+                    MouseArea {
+                      id: trashMouse
+                      anchors.fill: parent
+                      anchors.margins: -Style.space(6)
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onEntered: root.cursor = row.index
+                      onClicked: root.deleteTask(row.modelData)
                     }
                   }
                 }

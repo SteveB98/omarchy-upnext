@@ -13,6 +13,7 @@ for ((i = 0; i < ${#args[@]}; i++)); do
     https://*) url=${args[i]} ;;
   esac
 done
+[ "$method" = DELETE ] && printf '%s %s\n' "$method" "$url" >> "$FAKE_DIR/writes.log"
 [ -n "$data" ] && printf '%s %s %s\n' "$method" "$url" "$data" >> "$FAKE_DIR/writes.log"
 if [[ $hdr != "Authorization: Bearer "* ]]; then printf '{"error":"no auth header"}\n401'; exit 0; fi
 if [ -n "$FAKE_CODE" ]; then printf '%s\n%s' "${FAKE_BODY:-{\}}" "$FAKE_CODE"; exit 0; fi
@@ -31,6 +32,7 @@ case "$method $url" in
   "GET https://api.airtable.com/v0/appTestBase000001/tblTestTasks00001") body=$(cat "$F/tasks.json") ;;
   "GET https://api.airtable.com/v0/appTestBase000001/tblTestProjects01")
     if grep -q '^cellFormat=string' "$FAKE_DIR/params.log" 2>/dev/null; then body=$(cat "$F/projects-open.json"); else body=$(cat "$F/projects-all.json"); fi ;;
+  DELETE*) body='{"id":"recTask0000000001","deleted":true}' ;;
   PATCH*) body='{"id":"recTask0000000001","fields":{}}' ;;
   POST*) body='{"id":"recNew00000000001","fields":{}}' ;;
   *) printf '{"error":{"type":"NOT_FOUND"}}\n404'; exit 0 ;;

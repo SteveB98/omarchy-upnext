@@ -9,7 +9,8 @@ First public release.
   right-click opens the table in Airtable.
 - Panel: Today / Tomorrow / Week / Month (next 31 days) tabs, overdue first,
   priority dots and project names, pages with pager, wheel and keys. Click the
-  circle to mark a task done; click again to undo.
+  circle to mark a task done; click again to undo. Delete a task with the
+  trash icon (or `x`), which asks once before it deletes.
 - Quick add with natural dates (`fri`, `+3`, `oct 20`, `4 weeks from today`,
   `in 3 days`, `next month`), a project search and
   "+ New project".

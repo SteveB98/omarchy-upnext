@@ -201,7 +201,7 @@ It only shows if its status is one of your open statuses and it has a due date.
 - Like every Omarchy plugin, this runs as unsandboxed code in the Omarchy
   shell. It's a small amount of code (`BarWidget.qml`, `DateParse.js`,
   `upnext`, `manifest.json`), so it's quick to read before you enable it. It
-  does not use sudo, never installs packages, and never edits your
+  never asks for admin rights, never installs packages, and never edits your
   configuration files.
 
 ## Dependencies

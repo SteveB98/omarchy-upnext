@@ -802,7 +802,7 @@ Panel {
           // ---------- Empty ----------
           Text {
             width: parent.width
-            visible: root.loaded && root.shownTasks.length === 0
+            visible: root.loaded && root.configured && !root.needsSetup && root.shownTasks.length === 0
             textFormat: Text.PlainText
             horizontalAlignment: Text.AlignHCenter
             topPadding: Style.space(6)

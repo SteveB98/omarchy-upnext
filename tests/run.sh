@@ -109,14 +109,15 @@ check "renamed field picked up by id" '.fields.status.name == "State"' "$(cat "$
 # setup, answered through stdin with every default, then Team
 reset
 rm "$UPNEXT_CONFIG"
-# answers: keep token, 16 defaults (base, table, 6 fields, 3 statuses, 5 project questions), plan 1 = Team
-out=$({ echo y; printf '\n%.0s' {1..16}; echo 1; } | "$UPNEXT" setup 2>&1)
+# answers: keep token, 17 defaults (base, table, 6 fields, 3 statuses, priority order,
+# 5 project questions), plan 1 = Team
+out=$({ echo y; printf '\n%.0s' {1..17}; echo 1; } | "$UPNEXT" setup 2>&1)
 if [ -s "$UPNEXT_CONFIG" ]; then
   cfgjson=$(cat "$UPNEXT_CONFIG")
   check "setup maps fields by type and name" '.fields | .name.id == "fldName0000000001" and .due.id == "fldDue00000000001" and .status.id == "fldStatus00000001" and .priority.id == "fldPriority000001" and .start.id == "fldStart000000001" and .project.id == "fldProject0000001"' "$cfgjson"
   check "setup finds the project-name lookup" '.fields.projectLabel.id == "fldPLabel00000001"' "$cfgjson"
   check "setup status defaults" '.statuses == {"open":["Inbox","Next","Bob'"'"'s \\ stuff"],"done":"Done","new":"Next"}' "$cfgjson"
-  check "setup priorities in Airtable order" '.priorities == ["Urgent","High","Medium","Low"]' "$cfgjson"
+  check "setup puts ascending priorities most urgent first" '.priorities == ["Urgent","High","Medium","Low"]' "$cfgjson"
   check "setup projects mapping" '.projects | .tableId == "tblTestProjects01" and .client.name == "Client" and .doneStatuses == ["Completed"] and .newStatus == "Active" and .start.id == "fldPStart00000001"' "$cfgjson"
   check "setup plan" '.plan == "team" and .planSource == "setup"' "$cfgjson"
   check "setup config is private" '. == "600"' "$(stat -c %a "$UPNEXT_CONFIG" | jq -R .)"
@@ -124,6 +125,13 @@ if [ -s "$UPNEXT_CONFIG" ]; then
 else
   failed=$((failed + 1)); echo "FAIL: setup wrote no config"; echo "$out" | tail -15
 fi
+
+# a token without schema.bases:read gets told exactly what to add
+reset
+rm "$UPNEXT_CONFIG"
+out=$({ echo y; echo; } | FAKE_NO_SCHEMA=1 "$UPNEXT" setup 2>&1)
+check "setup explains a missing schema scope" 'test("schema.bases:read")' "$(jq -Rs . <<<"$out")"
+check "no config written without the scope" '. == false' "$([ -e "$UPNEXT_CONFIG" ] && echo true || echo false)"
 
 echo "$pass passed, $failed failed"
 rm -rf "$HERE/.out"

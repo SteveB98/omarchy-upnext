@@ -5,7 +5,7 @@
   {"id":"fldStart000000001","name":"Start","type":"date"},
   {"id":"fldDue00000000001","name":"Due {date}","type":"date"},
   {"id":"fldStatus00000001","name":"State","type":"singleSelect","options":{"choices":[{"name":"Inbox"},{"name":"Next"},{"name":"Bob's \\ stuff"},{"name":"Done"}]}},
-  {"id":"fldPriority000001","name":"Priority","type":"singleSelect","options":{"choices":[{"name":"Urgent"},{"name":"High"},{"name":"Medium"},{"name":"Low"}]}},
+  {"id":"fldPriority000001","name":"Priority","type":"singleSelect","options":{"choices":[{"name":"Low"},{"name":"Medium"},{"name":"High"},{"name":"Urgent"}]}},
   {"id":"fldProject0000001","name":"Project","type":"multipleRecordLinks","options":{"linkedTableId":"tblTestProjects01"}},
   {"id":"fldPLabel00000001","name":"Project Name","type":"multipleLookupValues","options":{"recordLinkFieldId":"fldProject0000001","fieldIdInLinkedTable":"fldPName000000001"}}
  ]},

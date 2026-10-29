@@ -21,8 +21,11 @@ if [ -n "$FAKE_422_ONCE" ] && [ ! -e "$FAKE_DIR/422-sent" ] && [[ $url == */tblT
   touch "$FAKE_DIR/422-sent"
   printf '{"error":{"type":"INVALID_FILTER_BY_FORMULA","message":"Unknown field names: status"}}\n422'; exit 0
 fi
+if [ -n "$FAKE_NO_SCHEMA" ] && [[ $url == */meta/bases* ]]; then
+  printf '{"error":{"type":"INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND"}}\n403'; exit 0
+fi
 case "$method $url" in
-  "GET https://api.airtable.com/v0/meta/whoami") body='{"id":"usrTest0000000001","scopes":["data.records:read","data.records:write","schema.bases:read"]}' ;;
+  "GET https://api.airtable.com/v0/meta/whoami") body='{"id":"usrTest0000000001"}' ;;
   "GET https://api.airtable.com/v0/meta/bases") body='{"bases":[{"id":"appTestBase000001","name":"Up Next Tasks","permissionLevel":"create"}]}' ;;
   "GET https://api.airtable.com/v0/meta/bases/appTestBase000001/tables") body=$(cat "$F/schema.json") ;;
   "GET https://api.airtable.com/v0/appTestBase000001/tblTestTasks00001") body=$(cat "$F/tasks.json") ;;

@@ -105,13 +105,14 @@ call() {
   BODY=${out%$'\n'*}
   local type
   type=$(jq -r '.error.type // .error // empty' <<<"$BODY" 2>/dev/null)
+  # Callers can take some failures themselves: ALLOW_STATUS="403 422".
+  [[ " ${ALLOW_STATUS:-} " == *" $CODE "* ]] && return 0
   case $CODE in
     2??) ;;
     401) fail auth "Airtable rejected the token" ;;
     403) fail access "The token can't use this base (check its scopes and access)" ;;
     404) fail access "Airtable can't find the base or table (was it deleted, or is it outside the token's access?)" ;;
-    422) [ "${ALLOW_422:-}" = 1 ] && return 0
-         fail http "Airtable said: $(jq -r '.error.message // .error.type // .error // empty' <<<"$BODY" 2>/dev/null)" ;;
+    422) fail http "Airtable said: $(jq -r '.error.message // .error.type // .error // empty' <<<"$BODY" 2>/dev/null)" ;;
     429) [[ $type == *BILLING* ]] && hit_monthly_limit
          fail rate "Airtable rate limit, retrying soon" ;;
     *) fail http "Airtable error $CODE: $(jq -r '.error.message // .error.type // .error // empty' <<<"$BODY" 2>/dev/null)" ;;
@@ -141,7 +142,8 @@ project_formula() {
 
 # A field was renamed in Airtable: pick up the new names by id, once.
 refresh_names() {
-  call "$API/meta/bases/$BASE/tables"
+  ALLOW_STATUS=403 call "$API/meta/bases/$BASE/tables"
+  [ "$CODE" = 403 ] && return 1   # token without schema.bases:read
   local schema=$BODY
   update_config --argjson s "$schema" '
     ($s.tables | map({key:.id, value:(.fields | map({key:.id, value:.name}) | from_entries)}) | from_entries) as $n
@@ -177,7 +179,7 @@ fetch() {
         [ -n "$fld" ] && args+=(--data-urlencode "fields[]=$fld")
       done
       [ -n "$offset" ] && args+=(--data-urlencode "offset=$offset")
-      ALLOW_422=1 call "${args[@]}"
+      ALLOW_STATUS=422 call "${args[@]}"
       if [ "$CODE" = 422 ]; then retry=1; break; fi
       pages=$(jq -c --argjson acc "$pages" '$acc + .records' <<<"$BODY")
       offset=$(jq -r '.offset // empty' <<<"$BODY")
@@ -531,19 +533,21 @@ EOF
   fi
   token
 
+  # whoami checks the token itself (a bad one is a 401). It doesn't list a
+  # personal token's scopes, so the schema scope shows up as a 403 below.
   call "$API/meta/whoami"
-  local who=$BODY
-  if ! jq -e '(.scopes // []) as $s | ["data.records:read","data.records:write","schema.bases:read"] | all(. as $x | $s | index($x))' <<<"$who" >/dev/null; then
-    echo "This token is missing a scope. It needs data.records:read, data.records:write and schema.bases:read."
-    echo "Edit it on https://airtable.com/create/tokens, then run setup again."
-    return 1
-  fi
 
   # ---- base
   echo
   say "2. Pick the base"
   local bases
-  call "$API/meta/bases"
+  ALLOW_STATUS=403 call "$API/meta/bases"
+  if [ "$CODE" = 403 ]; then
+    echo "This token can't read your bases' structure. Add the schema.bases:read scope"
+    echo "to it on https://airtable.com/create/tokens (the token itself stays the same),"
+    echo "then run setup again."
+    return 1
+  fi
   bases=$BODY
   local bnames bids
   mapfile -t bnames < <(jq -r '.bases[].name' <<<"$bases")
@@ -594,8 +598,23 @@ EOF
   mapfile -t openarr <<<"$open"
   new=$(choose "Status for new tasks:" "$(first_match 'next|to ?do|not started|backlog' 0 "${openarr[@]}")" "${openarr[@]}") || return 1
 
+  # Up Next ranks priorities most urgent first. Many bases list them the
+  # other way (Low, Medium, High), so flip those, then confirm.
   local prios='[]'
-  [ "$f_prio" != null ] && prios=$(choices_of "$TABLE_JSON" "$(jq -r .id <<<"$f_prio")" | jq -Rsc 'split("\n") | map(select(. != ""))')
+  if [ "$f_prio" != null ]; then
+    local plist ok
+    mapfile -t plist < <(choices_of "$TABLE_JSON" "$(jq -r .id <<<"$f_prio")")
+    if [ ${#plist[@]} -gt 0 ]; then
+      if [[ ${plist[0],,} =~ low|minor|trivial|later|someday ]] || [[ ${plist[-1],,} =~ urgent|critical|asap|highest|top ]]; then
+        mapfile -t plist < <(printf '%s\n' "${plist[@]}" | tac)
+      fi
+      local shown
+      shown=$(printf '%s, ' "${plist[@]}")
+      read -r -p "Priorities, most urgent first: ${shown%, }. Right? [Y/n] " ok || return 1
+      [[ ${ok:-y} =~ ^[Nn] ]] && mapfile -t plist < <(printf '%s\n' "${plist[@]}" | tac)
+      prios=$(printf '%s\n' "${plist[@]}" | jq -Rsc 'split("\n") | map(select(. != ""))')
+    fi
+  fi
 
   # ---- projects
   local projects=null label=null

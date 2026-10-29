@@ -30,7 +30,7 @@ You need **Omarchy 4** and an **Airtable account** (the Free plan works).
 
 1. **Get a task table.** Either use one you already have (it needs a name, a
    single-select status and a due date), or copy the template:
-   **[Copy the Up Next template base](TEMPLATE_LINK)**.
+   **[Copy the Up Next template base](https://airtable.com/appa1EslGooZq8Kw2/shrnIFCICyixgdx9f)**.
 
 2. **Install and turn on the plugin**, from the
    [Omarchy plugin marketplace](https://omarchyplugins.com) or with:

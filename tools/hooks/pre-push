@@ -1,0 +1,26 @@
+#!/bin/bash
+# Before anything leaves this machine:
+#   - refuse non-fast-forward pushes (no history rewrites on the remote),
+#   - refuse commits that credit an AI tool as a co-author.
+dir=$(dirname "$0")
+zero=0000000000000000000000000000000000000000
+msg=$(mktemp); trap 'rm -f "$msg"' EXIT
+while read -r _lref lsha _rref rsha; do
+  [ "$lsha" = "$zero" ] && { echo "pre-push: deleting remote refs is blocked here; do it on GitHub if you mean it." >&2; exit 1; }
+  if [ "$rsha" = "$zero" ]; then
+    range=$lsha
+  else
+    if ! git merge-base --is-ancestor "$rsha" "$lsha" 2>/dev/null; then
+      echo "pre-push: $_rref would be rewritten (non-fast-forward). Refusing." >&2
+      exit 1
+    fi
+    range=$rsha..$lsha
+  fi
+  for c in $(git rev-list "$range"); do
+    git log -1 --format=%B "$c" > "$msg"
+    if "$dir/attribution-check" "$msg"; then
+      echo "pre-push: commit ${c:0:7} credits an AI co-author. Reword it before pushing." >&2
+      exit 1
+    fi
+  done
+done

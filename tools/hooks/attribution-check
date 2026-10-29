@@ -1,0 +1,4 @@
+#!/bin/bash
+# Shared by commit-msg and pre-push: does this commit message credit an AI
+# tool as an author? Contributors on this repo are people.
+grep -qiE '^(co-authored-by:.*(claude|anthropic|noreply@anthropic\.com|copilot|cursor|openai|gpt))|generated with \[?claude|noreply@anthropic\.com' "$1"

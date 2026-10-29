@@ -1,0 +1,5 @@
+# Local test output and editor files
+/tests/.out/
+*.swp
+*~
+.DS_Store

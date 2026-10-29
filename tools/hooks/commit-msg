@@ -1,0 +1,7 @@
+#!/bin/bash
+# Refuse commit messages that credit an AI tool as a co-author.
+dir=$(dirname "$0")
+if "$dir/attribution-check" "$1"; then
+  echo "commit-msg: remove the AI co-author / 'Generated with' line from the message." >&2
+  exit 1
+fi

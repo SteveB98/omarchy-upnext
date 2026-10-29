@@ -23,8 +23,9 @@ jq -e '.id == "io.github.steveb98.upnext" and (.version | test("^[0-9]+\\.[0-9]+
 
 step "no personal Airtable ids outside tests and the demo"
 # Real base/table ids belong in ~/.config/upnext/config.json, never the repo.
+# appa1EslGooZq8Kw2 is the public template base linked from the README.
 if git ls-files | grep -vE '^(tests/|tools/demo/|tools/release-check)' \
-   | xargs grep -nE '\b(app|tbl)[A-Za-z0-9]{14}\b' 2>/dev/null | grep -vE '(app|tbl)(Test|Demo)'; then
+   | xargs grep -nE '\b(app|tbl)[A-Za-z0-9]{14}\b' 2>/dev/null | grep -vE '(app|tbl)(Test|Demo)|appa1EslGooZq8Kw2'; then
   bad "Airtable ids in tracked files"
 fi
 

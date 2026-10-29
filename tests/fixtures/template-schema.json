@@ -1,0 +1,19 @@
+{"tables":[
+ {"id":"tblTestTasks00001","name":"Tasks","primaryFieldId":"fldTName000000001","fields":[
+  {"id":"fldTName000000001","name":"Name","type":"singleLineText"},
+  {"id":"fldTStatus0000001","name":"Status","type":"singleSelect","options":{"choices":[{"name":"Inbox"},{"name":"Next"},{"name":"In Progress"},{"name":"Done"}]}},
+  {"id":"fldTDue0000000001","name":"Due","type":"date"},
+  {"id":"fldTStart00000001","name":"Start","type":"date"},
+  {"id":"fldTPriority00001","name":"Priority","type":"singleSelect","options":{"choices":[{"name":"Urgent"},{"name":"High"},{"name":"Medium"},{"name":"Low"}]}},
+  {"id":"fldTNotes00000001","name":"Notes","type":"multilineText"},
+  {"id":"fldTProject000001","name":"Project","type":"multipleRecordLinks","options":{"linkedTableId":"tblTestProjects01"}},
+  {"id":"fldTPLabel0000001","name":"Project Name","type":"multipleLookupValues","options":{"recordLinkFieldId":"fldTProject000001","fieldIdInLinkedTable":"fldTPName00000001"}}
+ ]},
+ {"id":"tblTestProjects01","name":"Projects","primaryFieldId":"fldTPName00000001","fields":[
+  {"id":"fldTPName00000001","name":"Name","type":"singleLineText"},
+  {"id":"fldTPClient000001","name":"Client","type":"singleLineText"},
+  {"id":"fldTPStatus000001","name":"Status","type":"singleSelect","options":{"choices":[{"name":"Active"},{"name":"Completed"}]}},
+  {"id":"fldTPStart0000001","name":"Start","type":"date"},
+  {"id":"fldTPTasks0000001","name":"Tasks","type":"multipleRecordLinks","options":{"linkedTableId":"tblTestTasks00001"}}
+ ]}
+]}

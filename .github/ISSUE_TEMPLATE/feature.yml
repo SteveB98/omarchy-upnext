@@ -1,0 +1,20 @@
+name: Idea or feature request
+description: Suggest something Up Next could do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like?
+      description: Describe the problem first, then the idea. Screenshots or sketches help.
+    validations:
+      required: true
+  - type: dropdown
+    id: plan
+    attributes:
+      label: Your Airtable plan
+      description: Some ideas cost API calls, which matters on the Free plan.
+      options:
+        - Free
+        - Team or higher
+        - Not sure

@@ -27,7 +27,7 @@ fi
 case "$method $url" in
   "GET https://api.airtable.com/v0/meta/whoami") body='{"id":"usrTest0000000001"}' ;;
   "GET https://api.airtable.com/v0/meta/bases") body='{"bases":[{"id":"appTestBase000001","name":"Up Next Tasks","permissionLevel":"create"}]}' ;;
-  "GET https://api.airtable.com/v0/meta/bases/appTestBase000001/tables") body=$(cat "$F/schema.json") ;;
+  "GET https://api.airtable.com/v0/meta/bases/appTestBase000001/tables") body=$(cat "$F/${FAKE_SCHEMA:-schema}.json") ;;
   "GET https://api.airtable.com/v0/appTestBase000001/tblTestTasks00001") body=$(cat "$F/tasks.json") ;;
   "GET https://api.airtable.com/v0/appTestBase000001/tblTestProjects01")
     if grep -q '^cellFormat=string' "$FAKE_DIR/params.log" 2>/dev/null; then body=$(cat "$F/projects-open.json"); else body=$(cat "$F/projects-all.json"); fi ;;

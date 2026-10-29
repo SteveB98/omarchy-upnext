@@ -1016,7 +1016,8 @@ Panel {
             horizontalAlignment: Text.AlignHCenter
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
-            text: (root.planSource === "billing-error" ? "Airtable's monthly limit was reached, so sync is light. " : "Light sync · ")
+            text: (root.planSource === "billing-error" && root.errorCode !== "monthly-limit"
+                    ? "Airtable's monthly limit was reached, so sync is light. " : "Light sync · ")
               + root.calls.toLocaleString(Qt.locale(), "f", 0) + " API calls this month"
               + (root.plan === "free" ? " (Free plan: " + root.freeMonthly.toLocaleString(Qt.locale(), "f", 0) + " per workspace)" : "")
             color: root.calls >= 0.8 * root.freeMonthly && root.plan === "free" ? root.urgent : root.faint

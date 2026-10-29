@@ -1,0 +1,37 @@
+name: Bug report
+description: Something in Up Next doesn't work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you saw instead.
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Up Next version (from manifest.json) and `omarchy version`.
+      placeholder: "Up Next 1.0.0, Omarchy 4.0.6"
+    validations:
+      required: true
+  - type: dropdown
+    id: plan
+    attributes:
+      label: Airtable plan and sync mode
+      options:
+        - Free, Light sync
+        - Team or higher, Live sync
+        - Other / not sure
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output of upnext config
+      description: |
+        Run `~/.config/omarchy/plugins/io.github.steveb98.upnext/upnext config` and paste the result.
+        It contains no token or task data. Please don't paste `upnext fetch` output unless you've removed task names.
+      render: json

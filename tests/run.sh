@@ -126,6 +126,16 @@ else
   failed=$((failed + 1)); echo "FAIL: setup wrote no config"; echo "$out" | tail -15
 fi
 
+# the published template base maps with every default accepted
+reset
+rm "$UPNEXT_CONFIG"
+{ echo y; printf '\n%.0s' {1..17}; echo 1; } | FAKE_SCHEMA=template-schema "$UPNEXT" setup >/dev/null 2>&1
+check "template base maps with no overrides" '
+  (.fields | map_values(.name?)) == {"name":"Name","due":"Due","status":"Status","priority":"Priority","start":"Start","project":"Project","projectLabel":"Project Name"}
+  and .statuses == {"open":["Inbox","Next","In Progress"],"done":"Done","new":"Next"}
+  and .priorities == ["Urgent","High","Medium","Low"]
+  and (.projects | .client.name == "Client" and .status.name == "Status" and .start.name == "Start" and .doneStatuses == ["Completed"] and .newStatus == "Active")' "$(cat "$UPNEXT_CONFIG" 2>/dev/null || echo '{}')"
+
 # a token without schema.bases:read gets told exactly what to add
 reset
 rm "$UPNEXT_CONFIG"

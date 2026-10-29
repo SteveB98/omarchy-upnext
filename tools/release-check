@@ -1,0 +1,52 @@
+#!/bin/bash
+# Everything that must pass before a release, and in CI:
+#   tools/release-check        all checks
+#   tools/release-check --ci   skip the checks that only make sense before tagging
+# Exits non-zero on the first failing group and says why.
+cd "$(dirname "$0")/.." || exit 1
+ci=${1:-}
+failed=0
+step() { printf '\n== %s\n' "$1"; }
+bad() { echo "FAIL: $1"; failed=1; }
+
+step "shellcheck"
+shellcheck -x upnext tests/run.sh tests/bin/* tools/hooks/* tools/demo/upnext tools/release-check || bad shellcheck
+
+step "bridge tests"
+tests/run.sh || bad "tests/run.sh"
+
+step "date and sync tests"
+node tests/date.test.mjs || bad "tests/date.test.mjs"
+
+step "manifest"
+jq -e '.id == "io.github.steveb98.upnext" and (.version | test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))' manifest.json >/dev/null || bad "manifest id or version"
+
+step "no personal Airtable ids outside tests and the demo"
+# Real base/table ids belong in ~/.config/upnext/config.json, never the repo.
+if git ls-files | grep -vE '^(tests/|tools/demo/|tools/release-check)' \
+   | xargs grep -nE '\b(app|tbl)[A-Za-z0-9]{14}\b' 2>/dev/null | grep -vE '(app|tbl)(Test|Demo)'; then
+  bad "Airtable ids in tracked files"
+fi
+
+step "no AI co-author trailers in history"
+if git log --format=%B | grep -qiE '^co-authored-by:.*(claude|anthropic|copilot|openai)|noreply@anthropic\.com|generated with \[?claude'; then
+  bad "a commit credits an AI tool"
+fi
+
+step "marketplace scanner traps"
+# Binary files with install/setup in the name fail the marketplace scan.
+if git ls-files | grep -iE '(install|setup|uninstall)[^/]*\.(png|jpe?g|gif|webp|mp4|webm|zip|tar|gz)$'; then
+  bad "binary file named like a setup file"
+fi
+
+if [ "$ci" != --ci ]; then
+  step "release readiness"
+  grep -q 'TEMPLATE_LINK' README.md && bad "README still has the TEMPLATE_LINK placeholder"
+  v=$(jq -r .version manifest.json)
+  head -5 CHANGELOG.md | grep -q "^## $v (20[0-9-]*)" || bad "CHANGELOG has no dated entry for $v"
+  [ -z "$(git status --porcelain)" ] || bad "uncommitted changes"
+fi
+
+echo
+[ "$failed" = 0 ] && echo "All checks passed." || echo "Some checks failed."
+exit "$failed"

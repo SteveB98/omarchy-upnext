@@ -60,6 +60,14 @@ check "delete sends DELETE for that record" 'test("^DELETE https://api.airtable.
 check "delete refuses bad record ids" '.ok == false and .error == "args"' "$("$UPNEXT" delete 'rec;rm -rf')"
 check "delete reports Airtable errors" '.ok == false and .error == "access"' "$(FAKE_CODE=404 "$UPNEXT" delete recTask0000000001)"
 
+# a record someone already removed: the table still reads, so it's just gone
+reset
+check "deleting a task that's already gone succeeds" '.ok and .deleted and .gone' "$(FAKE_WRITE_CODE=404 "$UPNEXT" delete recTask0000000001)"
+check "the gone check reads the table once" '. == 1' "$(grep -cF -- '-G https://api.airtable.com/v0/appTestBase000001/tblTestTasks00001 ' "$FAKE_DIR/argv.log")"
+check "a 403 for one record also means gone" '.ok and .gone' "$(FAKE_WRITE_CODE=403 "$UPNEXT" delete recTask0000000001)"
+check "ticking a task that's gone says so" '.ok == false and .error == "gone"' "$(FAKE_WRITE_CODE=404 "$UPNEXT" set recTask0000000001 Done)"
+check "a table out of reach is still an access error" '.ok == false and .error == "access"' "$(FAKE_CODE=403 "$UPNEXT" set recTask0000000001 Done)"
+
 reset
 out=$("$UPNEXT" add "Ship it" recProj0000000001 2026-10-28 2026-11-02)
 check "add ok" '.ok and .id == "recNew00000000001"' "$out"
@@ -67,6 +75,7 @@ body=$(sed -n 's/^POST [^ ]* //p' "$FAKE_DIR/writes.log")
 check "add uses the new-task status and all mapped fields" '.fields == {"fldName0000000001":"Ship it","fldDue00000000001":"2026-11-02","fldStatus00000001":"Next","fldStart000000001":"2026-10-28","fldProject0000001":["recProj0000000001"]}' "$body"
 check "add rejects bad dates" '.ok == false' "$("$UPNEXT" add x - - 11/02)"
 check "add rejects bad project ids" '.ok == false' "$("$UPNEXT" add x 'recX"' - 2026-11-02)"
+check "add refuses unknown statuses" '.ok == false and .error == "args"' "$("$UPNEXT" add x - - 2026-11-02 Bogus)"
 
 reset
 out=$("$UPNEXT" projects)
@@ -100,6 +109,23 @@ check "plan still team" '.plan == "team"' "$(cat "$UPNEXT_CONFIG")"
 check "billing 429 -> monthly-limit" '.error == "monthly-limit"' "$(FAKE_CODE=429 FAKE_BODY='{"error":{"type":"PUBLIC_API_BILLING_LIMIT_EXCEEDED","message":"limit"}}' "$UPNEXT" fetch)"
 check "billing error flips the plan to free" '.plan == "free" and .planSource == "billing-error"' "$(cat "$UPNEXT_CONFIG")"
 check "config stays private" '. == "600"' "$(stat -c %a "$UPNEXT_CONFIG" | jq -R .)"
+
+before=$("$UPNEXT" usage | jq .calls)
+check "no connection -> network" '.error == "network"' "$(FAKE_EXIT=7 "$UPNEXT" fetch)"
+check "a failed connection isn't counted as a call" ". == $before" "$("$UPNEXT" usage | jq .calls)"
+
+# 600 long-named tasks over 6 pages: far past the 128 KiB argument limit
+reset
+out=$(FAKE_PAGES=6 "$UPNEXT" fetch)
+check "big tables page through offsets" '.ok and (.tasks | length) == 600 and .tasks[599].id == "recBig00000000599"' "$out"
+check "every page was asked for" '. == 6' "$(grep -cF -- '-G https://api.airtable.com/v0/appTestBase000001/tblTestTasks00001 ' "$FAKE_DIR/argv.log")"
+
+# the project list can't load: the tasks still come back
+reset
+out=$(FAKE_PROJECTS_CODE=429 FAKE_BODY='{"errors":[{"error":"RATE_LIMIT_REACHED"}]}' "$UPNEXT" fetch)
+check "a project-name hiccup keeps the tasks" '.ok and (.tasks | length) == 2 and .tasks[0].project == ""' "$out"
+reset
+check "a project-name auth error is reported" '.ok == false and .error == "auth"' "$(FAKE_PROJECTS_CODE=401 "$UPNEXT" fetch)"
 
 # usage rolls over by month
 reset

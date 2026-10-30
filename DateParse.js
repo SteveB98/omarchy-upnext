@@ -38,7 +38,10 @@ function buildDate(today, y, m, d, explicitYear) {
   var dt = new Date(y, m - 1, d)
   if (isNaN(dt) || dt.getMonth() !== m - 1 || dt.getDate() !== d) return null
   // "oct 3" said in October means this year; said in December, next year.
-  if (!explicitYear && iso(dt) < addDays(today, -60)) dt.setFullYear(y + 1)
+  if (!explicitYear && iso(dt) < addDays(today, -60)) {
+    dt.setFullYear(y + 1)
+    if (dt.getMonth() !== m - 1) return null  // feb 29 has no next-year twin
+  }
   return iso(dt)
 }
 
@@ -51,7 +54,7 @@ function relativeDate(s, today) {
   if (!m) return null
   var word = m[2].trim()
   var n = /^\d/.test(word) ? Number(word) : numberWords[word]
-  if (!n) return null
+  if (n === undefined) return null
   // A bare number only reads as days with a "+": "+3", not "3".
   if (!m[3] && !m[1]) return null
   var base = m[4] === "from tomorrow" ? addDays(today, 1) : today
@@ -106,7 +109,7 @@ function parseDate(input, today) {
 }
 
 // Sync profiles. Live suits Airtable Team and up (no enforced monthly cap);
-// Light keeps a Free workspace well under its 1,000 calls a month.
+// Light paces itself to fit a Free workspace's 1,000 calls a month.
 //   mode: "Auto" | "Light" | "Live" (the setting); plan: "free" | "team"
 function profile(mode, plan) {
   if (mode === "Light") return "light"
@@ -114,12 +117,33 @@ function profile(mode, plan) {
   return plan === "team" ? "live" : "light"
 }
 
+// Seconds from now (a Date) to local midnight on the 1st of next month.
+function secondsToMonthEnd(now) {
+  var end = new Date(now.getFullYear(), now.getMonth() + 1, 1)
+  return Math.max(0, Math.round((end - now) / 1000))
+}
+
+// The 1st of the month after today, as "YYYY-MM-DD".
+function nextMonthStart(today) {
+  var d = parseIso(today)
+  return iso(new Date(d.getFullYear(), d.getMonth() + 1, 1))
+}
+
 // Background refresh in seconds. override 0 means the profile default; a
-// smaller override is raised to the profile minimum. Light slows to two
-// hours once 80% of the Free plan's monthly calls are used.
-function refreshSeconds(prof, override, calls, freeMonthly) {
+// smaller override is raised to the profile minimum.
+// Light spends at most half of the calls left this month on background
+// refreshes (the rest is for opening the panel, ticking, adding, and other
+// tools on the workspace), between 30 minutes and two hours apart. Past 80%
+// of the allowance it always waits two hours.
+function refreshSeconds(prof, override, calls, freeMonthly, secondsLeft) {
   var live = prof === "live"
   var base = override > 0 ? Math.max(override, live ? 300 : 900) : (live ? 300 : 1800)
-  if (!live && freeMonthly > 0 && calls >= 0.8 * freeMonthly) return Math.max(base, 7200)
+  if (live || !(freeMonthly > 0)) return base
+  if (calls >= 0.8 * freeMonthly) return Math.max(base, 7200)
+  if (secondsLeft > 0) {
+    var left = freeMonthly - calls
+    var paced = left > 0 ? Math.round(secondsLeft / (left * 0.5)) : 7200
+    base = Math.max(base, Math.min(paced, 7200))
+  }
   return base
 }

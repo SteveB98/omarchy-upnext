@@ -39,6 +39,27 @@ step "marketplace scanner traps"
 if git ls-files | grep -iE '(install|setup|uninstall)[^/]*\.(png|jpe?g|gif|webp|mp4|webm|zip|tar|gz)$'; then
   bad "binary file named like a setup file"
 fi
+# The scan reads everything but tests/, docs/ and .github/, comments and
+# README prose included. Any of these turns a clean listing into a review.
+# (The patterns are spelled so they don't match this file.)
+scanned=(-- . ':!tests' ':!docs' ':!.github')
+if git grep -nIiE '\b(su[d]o|pk[e]xec)\b' "${scanned[@]}"; then
+  bad "mentions an admin-rights tool (the scan reads that as a privilege capability)"
+fi
+if git grep -nIiE 'omarchy[[:space:]]+pkg[[:space:]]+(add|drop|remove|update)|\b(pacman|paru|yay|apt|apt-get|dnf|zypper|apk)[[:space:]]+(-[A-Za-z]*[SRU]|install|remove|upgrade|add|del)\b|\b(pip|pip3|pipx|npm|pnpm|yarn|bun|cargo|go|gem|brew)[[:space:]]+(install|add)\b' "${scanned[@]}"; then
+  bad "mentions a package-manager command"
+fi
+if git grep -nIiE '\b(sys[t]emctl|sys[t]emd-run)\b' "${scanned[@]}"; then
+  bad "mentions service management"
+fi
+if git grep -nIiE '(curl|wget)[^|]*\|[[:space:]]*(ba|z)?sh\b' "${scanned[@]}"; then
+  bad "pipes a download into a shell"
+fi
+
+step "no em dashes"
+if git grep -nI $'\u2014'; then
+  bad "em dash in a tracked file (use a colon, comma or parentheses)"
+fi
 
 if [ "$ci" != --ci ]; then
   step "release readiness"

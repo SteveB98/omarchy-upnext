@@ -17,9 +17,10 @@ Airtable.
 - **In the bar:** a checklist icon and the number of tasks due today. It turns
   red when something is overdue.
 - **In the panel:** Today / Tomorrow / Week / Month tabs, overdue tasks first,
-  priority dots and project names. Click the circle to mark a task done.
+  priority dots and project names. Click the circle to mark a task done, or the
+  trash icon (twice) to delete it.
 - **Quick add:** type a name, pick a project and write the due date the way you
-  would say it: `fri`, `+3`, `next mon`, `oct 20`.
+  would say it: `fri`, `in 2 weeks`, `next mon`, `oct 20`.
 - **Any table:** a guided setup reads your base and matches its fields, so it
   works with the table you already have, or with the ready-made template.
 - **Free or Team:** it adapts how often it syncs to your Airtable plan.
@@ -58,26 +59,28 @@ cap in practice. Up Next picks a sync style to match:
 
 | | Live (Team and up) | Light (Free) |
 |---|---|---|
-| Background refresh | every 5 minutes | every 30 minutes |
-| When you open the panel | always refreshes | refreshes if the list is over 2 minutes old |
+| Background refresh | every 5 minutes | every 30 to 120 minutes, paced so it uses at most half of the calls left this month |
+| When you open the panel | always refreshes | refreshes if the list is over 10 minutes old |
 | When you close the panel | refreshes | no call needed |
 | Project list for quick add | refreshed every 10 minutes | refreshed every hour |
 | Near the limit | n/a | above 80% of the month's calls, background refresh slows to every 2 hours |
 
-On Light sync the panel shows how many calls Up Next has made this month.
-Ticking or adding a task always takes effect right away on either plan.
+On Light sync the panel shows how many calls Up Next has made this month. At
+the start of a month that's a refresh about every 90 minutes; with calls to
+spare late in the month it speeds up to every 30. Ticking, adding or deleting a
+task always takes effect right away on either plan.
 
 Airtable's API can't tell an app which plan a workspace is on, so setup asks
 you. You can check under the workspace's **Billing** settings in Airtable. If
-you're on Free and Airtable ever reports the monthly limit, Up Next switches
-itself to Light sync and tells you, so it never keeps hammering a blocked
-workspace.
+Airtable ever reports the monthly limit, Up Next switches itself to Light sync,
+pauses background refreshes until the 1st (press `r` to try sooner) and tells
+you, so it never keeps hammering a blocked workspace.
 
 **My take:** I run Up Next on Airtable's Team plan. If your task base is where
 you live all day, and other tools (automations, Zapier, scripts) use the same
 workspace, Team is worth it: no monthly API cap, and the bar stays a few
 minutes behind Airtable at most. If Up Next is your only integration, Free with
-Light sync works fine.
+Light sync works fine: it paces itself to stay inside the allowance.
 
 To switch later without running setup again:
 
@@ -111,6 +114,19 @@ To switch later without running setup again:
 | `+` or `c` | Add a task |
 | `r` | Refresh now |
 | `Esc` | Close (or leave the add form) |
+
+### Open the panel from anywhere
+
+Up Next doesn't add a system-wide shortcut, so it can't clash with yours. To
+open your tasks with a key from any window, add a line to
+`~/.config/hypr/bindings.lua`:
+
+```lua
+o.bind("SUPER + CTRL + U", "Up Next", "omarchy-shell io.github.steveb98.upnext toggle")
+```
+
+Use any free combination: press **Super + K** to see the shortcuts already in
+use. The same command also takes `open` and `close` instead of `toggle`.
 
 **Quick add** dates accept `today`, `tomorrow`, `fri`, `next fri`, `+3`,
 `+2w`, `oct 20`, `20 oct`, `10/20` and `2026-10-20`, plus phrases like
@@ -175,12 +191,27 @@ Edit the token and add your task base under **Access**.
 
 **"Airtable's monthly API limit for this workspace is used up".**
 The workspace is on the Free plan and has used its 1,000 calls for the month,
-counting every tool connected to it. Up Next has switched to Light sync. Calls
-reset on the 1st of the month. See [Free or Team?](#free-or-team).
+counting every tool connected to it. Up Next has switched to Light sync and
+won't refresh in the background until calls reset on the 1st of the month
+(press `r` to try sooner). See [Free or Team?](#free-or-team).
+
+**The list is suddenly empty, or ticking a task says "Airtable said: ...".**
+A status option you mapped in setup was renamed or removed in Airtable. Up Next
+looks tasks up by status name, so run setup again from the panel. (Renamed
+*fields* are picked up on their own.)
 
 **"A field or status changed in Airtable".**
-A status option you mapped was renamed or removed. Run setup again from the
-panel.
+A field you mapped was deleted, or renamed while the token can't read the
+base's structure. Run setup again from the panel.
+
+**"No longer in Airtable".**
+Someone deleted the task in Airtable since the list last refreshed, so Up Next
+drops it from the list.
+
+**"Airtable is busy (rate limit)".**
+Too many requests reached the base at once, often from other tools. Up Next
+tries again once after a minute. A tick or delete that failed is undone, so do
+it again.
 
 **A task I just added isn't in the list.**
 It only shows if its status is one of your open statuses and it has a due date.
@@ -235,8 +266,9 @@ You can also delete the token on
   the network code small, testable and easy to read.
 - One request fetches every open task with a due date. The tabs are local date
   windows over that list, so switching tabs is instant and costs nothing.
-- Writes (done, undo, add) happen immediately. A task you tick flips straight
-  away and flips back if Airtable refuses.
+- Writes (done, undo, add, delete) happen immediately. A task you tick flips
+  straight away and flips back if Airtable refuses. A refresh that overlaps a
+  write is thrown away and run again after it, so the list never jumps back.
 - Tests run offline with a fake `curl` and keyring: `tests/run.sh` and
   `node tests/date.test.mjs`.
 

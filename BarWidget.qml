@@ -19,7 +19,9 @@ import "DateParse.js" as DateParse
 //
 // Sync follows the Airtable plan: Live (Team and up) refreshes every 5
 // minutes and on open/close; Light (Free, 1,000 API calls a month per
-// workspace) every 30 minutes and on open when the list is over 2 minutes old.
+// workspace) every 30 to 120 minutes, paced to the calls left this month, and
+// on open when the list is over 10 minutes old. After Airtable reports the
+// monthly limit, background refreshes pause until the 1st.
 //
 // "+" swaps the list for an add form (Name, Project, Start, Due) in the same
 // panel. Typing a project name that doesn't exist offers a "New project" row;
@@ -44,7 +46,7 @@ Panel {
   readonly property string addGlyph: String.fromCodePoint(0xF0415)
   readonly property string deleteGlyph: String.fromCodePoint(0xF09E7)
 
-  readonly property int maxRows: setting("maxRows", 5)
+  readonly property int maxRows: Math.max(1, setting("maxRows", 5))
   readonly property int refreshIntervalSec: setting("refreshIntervalSec", 0)
   readonly property string syncMode: setting("syncMode", "Auto")
   readonly property string weekStart: setting("weekStart", "Monday")
@@ -67,14 +69,17 @@ Panel {
 
   readonly property string profile: DateParse.profile(syncMode, plan)
   readonly property bool live: profile === "live"
-  readonly property int refreshSec: DateParse.refreshSeconds(profile, refreshIntervalSec, calls, freeMonthly)
+  readonly property int refreshSec: DateParse.refreshSeconds(profile, refreshIntervalSec, calls, freeMonthly, monthSecondsLeft)
+  property int monthSecondsLeft: DateParse.secondsToMonthEnd(new Date())  // updated on each fetch
   property double lastFetchAt: 0
+  property string pausedUntil: ""  // "YYYY-MM-DD" after the monthly limit: no background refresh before it
+  property bool rateRetried: false
 
   // ---------------------------------------------------------------- state
 
   property var tasks: []
   property bool loaded: false
-  property bool loading: false
+  readonly property bool loading: fetchProc.running
   property string errorCode: ""
   property string errorMessage: ""
   property string tab: "today"
@@ -82,6 +87,8 @@ Panel {
   property int page: 0
   property real rowHeight: 0   // measured from a delegate; all rows are one size
   property var queue: []       // pending writes: { id, status, prev } or { id, del, task }
+  property int writeSeq: 0     // bumped per write, so a fetch that overlapped one is dropped
+  property bool refreshAfterWrites: false
   property string armedId: ""  // task waiting for a second click (or x) to delete
 
   property string mode: "list" // "list" or "add"
@@ -181,7 +188,7 @@ Panel {
     if (code === "auth") return "Airtable rejected the saved token. Run setup to paste a new one."
     if (code === "access") return "The token needs data.records:read, data.records:write and schema.bases:read, with access to this base."
     if (code === "config") return "A field or status changed in Airtable. Run setup to match them again."
-    if (code === "monthly-limit") return "It resets on the 1st. Up Next has switched to light sync; see the README's \"Free or Team?\" section."
+    if (code === "monthly-limit") return "It resets on the 1st. Until then Up Next only refreshes when you press r; see the README's \"Free or Team?\" section."
     return ""
   }
 
@@ -225,7 +232,8 @@ Panel {
       return q === "" || (p.name + " " + p.client).toLowerCase().indexOf(q) !== -1
     }).slice(0, 4)
     var exists = projects.some(function(p) { return p.name.toLowerCase() === q })
-    if (q !== "" && !exists) found.push({ id: "", name: typed, client: "", status: "", isNew: true })
+    // Only once the list has loaded, or every project would look new.
+    if (q !== "" && !exists && projectsFetchedAt > 0) found.push({ id: "", name: typed, client: "", status: "", isNew: true })
     return found
   }
   readonly property bool showMatches: mode === "add" && projField.activeFocus && projMatches.length > 0
@@ -321,6 +329,26 @@ Panel {
     onTriggered: root.flash = ""
   }
 
+  // A Process whose reply is handed over once it has both closed stdout and
+  // exited. Those two signals come in no fixed order, and the next command in
+  // a chain (the queued write, the task after its new project) can only start
+  // once the process has exited.
+  component Job: Process {
+    id: self
+    signal settled(string text)
+    property string out: ""
+    property bool gotOut: false
+    function settle() {
+      if (running || !gotOut) return
+      gotOut = false
+      settled(out)
+    }
+    stdout: StdioCollector {
+      onStreamFinished: { self.out = text; self.gotOut = true; self.settle() }
+    }
+    onRunningChanged: if (!running) settle()
+  }
+
   Process {
     id: configProc
     command: [root.helper, "config"]
@@ -381,81 +409,110 @@ Panel {
         if (r.ok) {
           root.projects = r.projects || []
           root.projectsFetchedAt = Date.now()
+        } else if (root.mode === "add") {
+          root.formError = "Couldn't load projects: " + (r.message || "unexpected reply")
         }
       }
     }
   }
 
-  Process {
+  Job {
     id: newProjProc
-    stdout: StdioCollector {
-      onStreamFinished: root.applyNewProject(text)
-    }
+    onSettled: function(text) { root.applyNewProject(text) }
   }
 
-  Process {
+  Job {
     id: addProc
     property string due: ""
     property string name: ""
-    stdout: StdioCollector {
-      onStreamFinished: root.applyAdd(text)
-    }
+    onSettled: function(text) { root.applyAdd(text) }
   }
 
   // ---------------------------------------------------------------- airtable
 
-  Process {
+  Job {
     id: fetchProc
+    property int seq: 0   // root.writeSeq when this fetch started
     command: [root.helper, "fetch"]
-    stdout: StdioCollector {
-      onStreamFinished: root.applyFetch(text)
-    }
-    onRunningChanged: root.loading = running
+    onSettled: function(text) { root.applyFetch(text) }
   }
 
   function refresh() {
     root.today = iso(new Date())
-    if (fetchProc.running || setProc.running || queue.length > 0) return
+    if (fetchProc.running || setProc.running || queue.length > 0) {
+      if (setProc.running || queue.length > 0) root.refreshAfterWrites = true
+      return
+    }
+    fetchProc.seq = root.writeSeq
     fetchProc.running = true
   }
 
-  // Light sync skips a fetch when the list is under 2 minutes old.
+  // Timer and panel-open refreshes; a manual refresh (r) skips the pause.
+  function backgroundRefresh() {
+    root.today = iso(new Date())
+    if (root.pausedUntil !== "" && root.today < root.pausedUntil) return
+    root.pausedUntil = ""
+    root.refresh()
+  }
+
+  // Light sync skips a fetch when the list is under 10 minutes old.
   function refreshIfStale() {
-    if (root.live || Date.now() - root.lastFetchAt > 2 * 60 * 1000) root.refresh()
+    if (root.live || Date.now() - root.lastFetchAt > 10 * 60 * 1000) root.backgroundRefresh()
     else root.today = iso(new Date())
   }
 
   function applyFetch(text) {
+    // A write went out while this fetch ran, so its list may be from before
+    // the write: drop it and fetch again once the writes are done.
+    if (fetchProc.seq !== root.writeSeq || setProc.running || queue.length > 0) {
+      root.refreshAfterWrites = true
+      if (!setProc.running && queue.length === 0) Qt.callLater(root.drained)
+      return
+    }
     var r
     try { r = JSON.parse(text) } catch (e) { r = { ok: false, error: "parse", message: "Unexpected reply from upnext" } }
+    root.monthSecondsLeft = DateParse.secondsToMonthEnd(new Date())
     if (r.ok) {
       root.tasks = r.tasks || []
       root.errorCode = ""
       root.errorMessage = ""
       root.loaded = true
       root.lastFetchAt = Date.now()
+      root.pausedUntil = ""
+      root.rateRetried = false
       if (r.plan) root.plan = r.plan
       if (r.calls !== undefined) root.calls = r.calls
     } else {
       root.errorCode = r.error || "unknown"
       root.errorMessage = r.message || "Couldn't load tasks"
       if (root.needsSetup) root.tasks = []
-      // upnext has already switched the saved plan to free.
+      // upnext has already switched the saved plan to free. Background
+      // refreshes wait for the reset on the 1st, whatever the sync mode.
       if (root.errorCode === "monthly-limit") {
         root.plan = "free"
         root.planSource = "billing-error"
+        root.pausedUntil = DateParse.nextMonthStart(root.today)
+      }
+      // One quiet retry a minute after Airtable's rate limit.
+      if (root.errorCode === "rate" && !root.rateRetried) {
+        root.rateRetried = true
+        rateRetry.start()
       }
       if (root.errorCode === "no-config") root.configured = false
     }
     root.clampCursor()
   }
 
-  Process {
+  Timer {
+    id: rateRetry
+    interval: 60 * 1000
+    onTriggered: root.refresh()
+  }
+
+  Job {
     id: setProc
-    property var job: null
-    stdout: StdioCollector {
-      onStreamFinished: root.applySet(setProc.job, text)
-    }
+    property var current: null   // the queue entry being written
+    onSettled: function(text) { root.applySet(setProc.current, text) }
   }
 
   function withStatus(id, status) {
@@ -472,6 +529,7 @@ Panel {
     if (!task) return
     var next = task.status === root.doneStatus ? (task.prev || root.newStatus) : root.doneStatus
     withStatus(task.id, next)
+    root.writeSeq++
     root.queue = root.queue.concat([{ id: task.id, status: next, prev: task.status, prevPrev: task.prev }])
     pumpQueue()
   }
@@ -491,6 +549,7 @@ Panel {
     root.clampCursor()
     root.flash = "Deleted: " + task.name
     flashTimer.restart()
+    root.writeSeq++
     root.queue = root.queue.concat([{ id: task.id, del: true, task: task }])
     pumpQueue()
   }
@@ -502,19 +561,34 @@ Panel {
   }
 
   function pumpQueue() {
-    if (setProc.running || queue.length === 0) return
-    setProc.job = queue[0]
+    if (setProc.running) return
+    if (queue.length === 0) { drained(); return }
+    setProc.current = queue[0]
     root.queue = queue.slice(1)
-    setProc.command = setProc.job.del ? [root.helper, "delete", setProc.job.id]
-                                      : [root.helper, "set", setProc.job.id, setProc.job.status]
+    setProc.command = setProc.current.del ? [root.helper, "delete", setProc.current.id]
+                                          : [root.helper, "set", setProc.current.id, setProc.current.status]
     setProc.running = true
+  }
+
+  // Every write is done: run the refresh that was held back for them.
+  function drained() {
+    if (!root.refreshAfterWrites) return
+    root.refreshAfterWrites = false
+    root.refresh()
   }
 
   function applySet(job, text) {
     var r
     try { r = JSON.parse(text) } catch (e) { r = { ok: false, message: "Unexpected reply from upnext" } }
-    if (!r.ok && job && job.del) {
-      root.tasks = root.tasks.concat([job.task])
+    if (!r.ok && job && r.error === "gone") {
+      // Ticked a task someone already removed in Airtable: drop the row.
+      var gone = (root.tasks.find(function(t) { return t.id === job.id }) || {}).name
+      root.tasks = root.tasks.filter(function(t) { return t.id !== job.id })
+      root.flash = "No longer in Airtable" + (gone ? ": " + gone : "")
+      flashTimer.restart()
+      root.clampCursor()
+    } else if (!r.ok && job && job.del) {
+      if (!root.tasks.some(function(t) { return t.id === job.id })) root.tasks = root.tasks.concat([job.task])
       root.flash = ""
       root.errorCode = r.error || "unknown"
       root.errorMessage = r.message || "Couldn't delete the task"
@@ -527,6 +601,7 @@ Panel {
       root.errorCode = r.error || "unknown"
       root.errorMessage = r.message || "Couldn't update the task"
     }
+    // The process has exited (Job), so the next write can start.
     Qt.callLater(root.pumpQueue)
   }
 
@@ -545,10 +620,10 @@ Panel {
     repeat: true
     running: root.configured
     triggeredOnStart: true
-    onTriggered: root.refresh()
+    onTriggered: root.backgroundRefresh()
   }
 
-  // Opening shows a current list (on Light, unless it's under 2 minutes
+  // Opening shows a current list (on Light, unless it's under 10 minutes
   // old). Closing drops ticked rows; Live also refetches then.
   onOpenedChanged: {
     root.page = 0
@@ -561,7 +636,7 @@ Panel {
     }
     root.mode = "list"
     root.tasks = root.tasks.filter(function(t) { return t.status !== root.doneStatus })
-    if (root.live && root.configured) root.refresh()
+    if (root.live && root.configured) root.backgroundRefresh()
   }
   onTabChanged: {
     root.page = 0
@@ -685,7 +760,7 @@ Panel {
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
-        if (t === "\u007f") root.deleteTask(root.shownTasks[root.cursor])  // Delete key
+        if (t === "\u007f") { if (!root.needsSetup) root.deleteTask(root.shownTasks[root.cursor]) }  // Delete key
         else if (t === "o" || t === "O") root.openTask(root.shownTasks[root.cursor])
         else if (t === "a" || t === "A") root.openUrl(root.tableUrl)
         else if (t === "r" || t === "R") root.refresh()

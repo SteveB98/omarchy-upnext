@@ -25,6 +25,7 @@
 
 set -o pipefail
 
+# UPNEXT_CONFIG and UPNEXT_STATE exist for the offline tests (tests/run.sh).
 CONFIG=${UPNEXT_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/upnext/config.json}
 STATE=${UPNEXT_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/upnext}
 API=https://api.airtable.com/v0
@@ -96,12 +97,13 @@ hit_monthly_limit() {
 }
 
 # curl wrapper: sets $BODY and $CODE, maps errors to {ok:false} and exits.
+# Only calls that reach Airtable count against the month.
 call() {
   local out
-  count_call
   out=$(curl -sS --max-time 20 -w '\n%{http_code}' \
     -H @<(printf 'Authorization: Bearer %s\n' "$TOKEN") "$@" 2>&1) \
     || fail network "Can't reach Airtable"
+  count_call
   CODE=${out##*$'\n'}
   BODY=${out%$'\n'*}
   local type
@@ -115,9 +117,21 @@ call() {
     404) fail access "Airtable can't find the base or table (was it deleted, or is it outside the token's access?)" ;;
     422) fail http "Airtable said: $(jq -r '.error.message // .error.type // .error // empty' <<<"$BODY" 2>/dev/null)" ;;
     429) [[ $type == *BILLING* ]] && hit_monthly_limit
-         fail rate "Airtable rate limit, retrying soon" ;;
+         fail rate "Airtable is busy (rate limit). Try again in a minute." ;;
     *) fail http "Airtable error $CODE: $(jq -r '.error.message // .error.type // .error // empty' <<<"$BODY" 2>/dev/null)" ;;
   esac
+}
+
+# <list so far> -> the list plus this page's records. Both go through stdin:
+# a long list is too big for one jq argument (Linux caps those at 128 KiB).
+add_page() { printf '%s\n%s' "$1" "$BODY" | jq -cs '.[0] + .[1].records'; }
+
+# A write to one record got a 403 or 404. Airtable answers that way both
+# when the record is gone and when the base or table is out of reach, so one
+# read of the table tells them apart: if it fails, call() reports why.
+check_table() {
+  call -G "$API/$BASE/$TABLE" --data-urlencode "maxRecords=1" \
+    --data-urlencode "fields[]=$(cfg .fields.name.id)"
 }
 
 # ------------------------------------------------------------------ formulas
@@ -145,16 +159,16 @@ project_formula() {
 refresh_names() {
   ALLOW_STATUS=403 call "$API/meta/bases/$BASE/tables"
   [ "$CODE" = 403 ] && return 1   # token without schema.bases:read
-  local schema=$BODY
-  update_config --argjson s "$schema" '
-    ($s.tables | map({key:.id, value:(.fields | map({key:.id, value:.name}) | from_entries)}) | from_entries) as $n
+  # A big base's schema is too long for one argument, so it goes in on stdin.
+  update_config --slurpfile s /dev/stdin '
+    ($s[0].tables | map({key:.id, value:(.fields | map({key:.id, value:.name}) | from_entries)}) | from_entries) as $n
     | .tableId as $t
     | .fields |= with_entries(if .value == null then . else .value.name = ($n[$t][.value.id] // .value.name) end)
     | if .projects == null then . else
         .projects.tableId as $pt
         | .projects |= with_entries(if (.value|type) == "object" and (.value.id? // null) != null
                                      then .value.name = ($n[$pt][.value.id] // .value.name) else . end)
-      end'
+      end' <<<"$BODY"
 }
 
 # ------------------------------------------------------------------ commands
@@ -182,7 +196,7 @@ fetch() {
       [ -n "$offset" ] && args+=(--data-urlencode "offset=$offset")
       ALLOW_STATUS=422 call "${args[@]}"
       if [ "$CODE" = 422 ]; then retry=1; break; fi
-      pages=$(jq -c --argjson acc "$pages" '$acc + .records' <<<"$BODY")
+      pages=$(add_page "$pages")
       offset=$(jq -r '.offset // empty' <<<"$BODY")
       [ -n "$offset" ] || break
     done
@@ -196,12 +210,21 @@ fetch() {
   local names='{}'
   if [ -n "$f_proj" ] && [ -z "$f_label" ]; then
     names=$(project_names "$pages")
+    # project_names runs in a subshell, so a failed call comes back as its
+    # error line. A passing hiccup keeps the cached names; the rest is reported.
+    if jq -e 'has("ok")' <<<"$names" >/dev/null 2>&1; then
+      case $(jq -r '.error' <<<"$names") in
+        network|rate) names=$(jq -c '.names // {}' "$STATE/projects-$BASE.json" 2>/dev/null || echo '{}') ;;
+        *) echo "$names"; exit 0 ;;
+      esac
+    fi
   fi
 
-  jq -c --arg n "$f_name" --arg d "$f_due" --arg s "$f_status" --arg r "$f_prio" \
-    --arg p "$f_proj" --arg l "$f_label" --argjson names "$names" \
+  printf '%s\n%s' "$pages" "$names" | jq -cs --arg n "$f_name" --arg d "$f_due" --arg s "$f_status" --arg r "$f_prio" \
+    --arg p "$f_proj" --arg l "$f_label" \
     --arg plan "$(cfg .plan)" --argjson calls "$(calls_this_month)" '
-    {ok:true, fetchedAt:(now|floor), plan:$plan, calls:$calls, tasks:[ .[] | {
+    .[1] as $names | .[0]
+    | {ok:true, fetchedAt:(now|floor), plan:$plan, calls:$calls, tasks:[ .[] | {
       id,
       name: (.fields[$n] // "Untitled" | tostring),
       project: (if $l != "" then ((.fields[$l] // []) | map(tostring) | join(", "))
@@ -213,7 +236,7 @@ fetch() {
               else . end),
       status: (.fields[$s] // "" | if type == "object" then .name else tostring end),
       priority: (if $r == "" then "" else (.fields[$r] // "" | if type == "object" then .name else tostring end) end)
-    } | select(.due | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")) ]}' <<<"$pages"
+    } | select(.due | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")) ]}'
 }
 
 # id -> project name for every project the tasks link to. The names are
@@ -231,7 +254,7 @@ project_names() {
     age=$(( $(date +%s) - $(jq -r '.at // 0' "$cache" 2>/dev/null || echo 0) ))
   fi
   local missing
-  missing=$(jq -n --argjson w "$want" --argjson h "$have" '[$w[] | select($h[.] == null)] | length')
+  missing=$(printf '%s\n%s' "$want" "$have" | jq -s '.[1] as $h | [.[0][] | select($h[.] == null)] | length')
   if [ "$missing" -gt 0 ] && [ "$age" -ge "$ttl" ]; then
     local tbl pn offset="" all="[]"
     tbl=$(cfg .projects.tableId); pn=$(cfg .projects.name.id)
@@ -241,13 +264,13 @@ project_names() {
           --data-urlencode "pageSize=100" --data-urlencode "fields[]=$pn")
         [ -n "$offset" ] && args+=(--data-urlencode "offset=$offset")
         call "${args[@]}"
-        all=$(jq -c --argjson acc "$all" '$acc + .records' <<<"$BODY")
+        all=$(add_page "$all")
         offset=$(jq -r '.offset // empty' <<<"$BODY")
         [ -n "$offset" ] || break
       done
       have=$(jq -c --arg pn "$pn" 'map({key:.id, value:(.fields[$pn] // "" | tostring)}) | from_entries' <<<"$all")
       mkdir -p "$STATE" && chmod 700 "$STATE"
-      jq -cn --argjson n "$have" '{at:(now|floor), names:$n}' > "$cache"
+      jq -c '{at:(now|floor), names:.}' <<<"$have" > "$cache"
     fi
   fi
   echo "$have"
@@ -259,16 +282,26 @@ set_status() {
   jq -e --arg s "$2" '(.statuses.open + [.statuses.done]) | index($s)' "$CONFIG" >/dev/null \
     || fail args "That status isn't one Up Next manages"
   token
-  call -X PATCH "$API/$BASE/$TABLE/$1" -H "Content-Type: application/json" \
+  ALLOW_STATUS="403 404" call -X PATCH "$API/$BASE/$TABLE/$1" -H "Content-Type: application/json" \
     --data "$(jq -cn --arg f "$(cfg .fields.status.id)" --arg s "$2" '{fields:{($f):$s}}')"
+  if [ "$CODE" = 403 ] || [ "$CODE" = 404 ]; then
+    check_table
+    fail gone "That task is no longer in Airtable"
+  fi
   jq -cn --arg id "$1" --arg s "$2" '{ok:true,id:$id,status:$s}'
 }
 
+# A task that is already gone counts as deleted.
 delete_task() {
   [[ $1 =~ ^rec[A-Za-z0-9]{14}$ ]] || fail args "Bad record id"
   load_config
   token
-  call -X DELETE "$API/$BASE/$TABLE/$1"
+  ALLOW_STATUS="403 404" call -X DELETE "$API/$BASE/$TABLE/$1"
+  if [ "$CODE" = 403 ] || [ "$CODE" = 404 ]; then
+    check_table
+    jq -cn --arg id "$1" '{ok:true,id:$id,deleted:true,gone:true}'
+    return
+  fi
   jq -cn --arg id "$1" '{ok:true,id:$id,deleted:true}'
 }
 
@@ -294,7 +327,7 @@ projects() {
     [ -n "$ps" ] && args+=(--data-urlencode "fields[]=$ps")
     [ -n "$offset" ] && args+=(--data-urlencode "offset=$offset")
     call "${args[@]}"
-    pages=$(jq -c --argjson acc "$pages" '$acc + .records' <<<"$BODY")
+    pages=$(add_page "$pages")
     offset=$(jq -r '.offset // empty' <<<"$BODY")
     [ -n "$offset" ] || break
   done
@@ -314,6 +347,8 @@ add_task() {
   [ "$project" = "-" ] || [ -z "$project" ] || [[ $project =~ ^rec[A-Za-z0-9]{14}$ ]] || fail args "Bad project id"
   load_config
   [ -n "$status" ] || status=$(cfg .statuses.new)
+  jq -e --arg s "$status" '(.statuses.open + [.statuses.done]) | index($s)' "$CONFIG" >/dev/null \
+    || fail args "That status isn't one Up Next manages"
   token
   local body
   body=$(jq -c --arg name "$name" --arg project "${project:--}" --arg start "${start:--}" --arg due "$due" \
@@ -459,12 +494,14 @@ first_match() {
   echo "$fallback"
 }
 
-# pick_field <label> <regex> <optional:0|1> <jq type filter> -> {"id","name"} or null
+# pick_field <label> <regex> <optional:0|1> <jq type filter> [table json] [field id]
+#   -> {"id","name"} or null. The filter can use $other, the optional field id
+#   (for example the field already picked for something else).
 pick_field() {
-  local label=$1 re=$2 optional=$3 types=$4 tbl=${5:-$TABLE_JSON}
+  local label=$1 re=$2 optional=$3 types=$4 tbl=${5:-$TABLE_JSON} other=${6:-}
   local names ids
-  mapfile -t names < <(jq -r ".fields[] | select($types) | .name" <<<"$tbl")
-  mapfile -t ids < <(jq -r ".fields[] | select($types) | .id" <<<"$tbl")
+  mapfile -t names < <(jq -r --arg other "$other" ".fields[] | select($types) | .name" <<<"$tbl")
+  mapfile -t ids < <(jq -r --arg other "$other" ".fields[] | select($types) | .id" <<<"$tbl")
   if [ ${#names[@]} -eq 0 ]; then
     [ "$optional" = 1 ] && { echo null; return; }
     echo "This table has no field that can be the $label." >&2
@@ -586,11 +623,11 @@ EOF
   local f_name f_due f_status f_prio f_start f_proj
   local primary
   primary=$(jq -r '.primaryFieldId' <<<"$TABLE_JSON")
-  f_name=$(pick_field "Task name" "^(name|task|title)" 0 '.id == "'"$primary"'" or .type == "singleLineText" or .type == "formula"') || return 1
+  f_name=$(pick_field "Task name" "^(name|task|title)" 0 '.id == $other or .type == "singleLineText" or .type == "formula"' "" "$primary") || return 1
   f_due=$(pick_field "Due date" 'due|end|deadline' 0 '.type == "date" or .type == "dateTime"') || return 1
   f_status=$(pick_field "Status (single select)" 'status|state|stage' 0 '.type == "singleSelect"') || return 1
-  f_prio=$(pick_field "Priority (optional)" 'priority|importance' 1 '.type == "singleSelect" and .id != "'"$(jq -r .id <<<"$f_status")"'"') || return 1
-  f_start=$(pick_field "Start date (optional)" 'start|begin' 1 '(.type == "date" or .type == "dateTime") and .id != "'"$(jq -r .id <<<"$f_due")"'"') || return 1
+  f_prio=$(pick_field "Priority (optional)" 'priority|importance' 1 '.type == "singleSelect" and .id != $other' "" "$(jq -r .id <<<"$f_status")") || return 1
+  f_start=$(pick_field "Start date (optional)" 'start|begin' 1 '(.type == "date" or .type == "dateTime") and .id != $other' "" "$(jq -r .id <<<"$f_due")") || return 1
   f_proj=$(pick_field "Project link (optional)" 'project|client|job' 1 '.type == "multipleRecordLinks"') || return 1
 
   # ---- statuses
@@ -663,9 +700,12 @@ EOF
 Airtable's Free plan allows 1,000 API calls per workspace each month, shared
 by every tool connected to it. Up Next adapts:
   Team or higher: live sync, refreshing every 5 minutes.
-  Free:           light sync, every 30 minutes and when you open the panel.
+  Free:           light sync, every 30 to 120 minutes, paced so background
+                  refreshes use at most half of the calls left this month,
+                  plus a refresh when you open the panel.
 You can see the plan in Airtable under the workspace's Billing settings.
-If Airtable ever reports the monthly limit, Up Next switches to light sync.
+If Airtable ever reports the monthly limit, Up Next pauses background refreshes
+until the 1st and switches to light sync.
 EOF
   local plan
   plan=$(choose "Which plan is this base's workspace on?" 2 "Team or higher" "Free" "Not sure (use light sync)") || return 1

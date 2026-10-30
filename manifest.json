@@ -5,7 +5,7 @@
   "version": "1.0.0",
   "author": "Steve B",
   "license": "MIT",
-  "description": "Your Airtable tasks in the Omarchy bar: due today, tomorrow, this week and the next 31 days. Tick to complete, add tasks with natural dates, and a guided setup that maps any Airtable table. Works on Airtable's Free and Team plans.",
+  "description": "Your Airtable tasks in the Omarchy bar: due today, tomorrow, this week and the next 31 days. Tick to complete or delete, add tasks with natural dates (\"fri\", \"in 2 weeks\"), and a guided setup that maps any Airtable table. Works on Airtable's Free and Team plans.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Up Next",
-    "description": "Airtable tasks due soon, one-click completion and quick add.",
+    "description": "Airtable tasks due soon, one-click completion, delete and quick add.",
     "category": "Productivity",
     "aliases": [
       "upnext",
@@ -50,7 +50,7 @@
           "Live"
         ],
         "defaultValue": "Auto",
-        "description": "Auto follows the Airtable plan picked in setup: Live (every 5 minutes) for Team and up, Light (every 30 minutes) for Free, which allows 1,000 API calls a month per workspace."
+        "description": "Auto follows the Airtable plan picked in setup: Live (every 5 minutes) for Team and up, Light (every 30 to 120 minutes, paced to the calls left) for Free, which allows 1,000 API calls a month per workspace."
       },
       {
         "key": "refreshIntervalSec",

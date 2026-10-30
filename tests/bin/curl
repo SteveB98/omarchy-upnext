@@ -1,15 +1,23 @@
 #!/bin/bash
 # Fake curl for the upnext tests. Logs its argv, checks the auth header file,
 # and answers from fixtures by method and URL. FAKE_CODE / FAKE_BODY force a reply.
+#   FAKE_WRITE_CODE    same, but only for PATCH/POST/DELETE (reads still work)
+#   FAKE_PROJECTS_CODE same, but only for reads of the projects table
+#   FAKE_PAGES=<n>     the tasks table answers in n pages of 100
+#                      long-named tasks, linked by offsets
+#   FAKE_EXIT=<code>   exit like a connection failure, with no reply
 printf '%s\n' "$*" >> "$FAKE_DIR/argv.log"
-method=GET url="" data="" hdr=""
+# FAKE_EXIT: fail like curl does when it can't connect
+if [ -n "$FAKE_EXIT" ]; then echo "curl: (7) Failed to connect" >&2; exit "$FAKE_EXIT"; fi
+method=GET url="" data="" hdr="" offset=""
 args=("$@")
 for ((i = 0; i < ${#args[@]}; i++)); do
   case ${args[i]} in
     -X) method=${args[i+1]} ;;
     -H) [[ ${args[i+1]} == @* ]] && hdr=$(cat "${args[i+1]#@}") ;;
     --data) data=${args[i+1]} ;;
-    --data-urlencode) printf '%s\n' "${args[i+1]}" >> "$FAKE_DIR/params.log" ;;
+    --data-urlencode) printf '%s\n' "${args[i+1]}" >> "$FAKE_DIR/params.log"
+                      [[ ${args[i+1]} == offset=* ]] && offset=${args[i+1]#offset=} ;;
     https://*) url=${args[i]} ;;
   esac
 done
@@ -17,6 +25,13 @@ done
 [ -n "$data" ] && printf '%s %s %s\n' "$method" "$url" "$data" >> "$FAKE_DIR/writes.log"
 if [[ $hdr != "Authorization: Bearer "* ]]; then printf '{"error":"no auth header"}\n401'; exit 0; fi
 if [ -n "$FAKE_CODE" ]; then printf '%s\n%s' "${FAKE_BODY:-{\}}" "$FAKE_CODE"; exit 0; fi
+if [ -n "$FAKE_WRITE_CODE" ] && [ "$method" != GET ]; then
+  not_found='{"error":"NOT_FOUND"}'
+  printf '%s\n%s' "${FAKE_BODY:-$not_found}" "$FAKE_WRITE_CODE"; exit 0
+fi
+if [ -n "$FAKE_PROJECTS_CODE" ] && [[ $url == */tblTestProjects01 ]]; then
+  printf '%s\n%s' "${FAKE_BODY:-{\}}" "$FAKE_PROJECTS_CODE"; exit 0
+fi
 F=$(dirname "$0")/../fixtures
 if [ -n "$FAKE_422_ONCE" ] && [ ! -e "$FAKE_DIR/422-sent" ] && [[ $url == */tblTestTasks00001 ]]; then
   touch "$FAKE_DIR/422-sent"
@@ -24,6 +39,16 @@ if [ -n "$FAKE_422_ONCE" ] && [ ! -e "$FAKE_DIR/422-sent" ] && [[ $url == */tblT
 fi
 if [ -n "$FAKE_NO_SCHEMA" ] && [[ $url == */meta/bases* ]]; then
   printf '{"error":{"type":"INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND"}}\n403'; exit 0
+fi
+if [ -n "$FAKE_PAGES" ] && [ "$method $url" = "GET https://api.airtable.com/v0/appTestBase000001/tblTestTasks00001" ]; then
+  page=${offset#p}; page=${page:-0}
+  jq -cn --argjson page "$page" --argjson pages "$FAKE_PAGES" '
+    {records: [range(100) as $i | {
+      id: ("recBig" + ("\($page * 100 + $i)" | (("0" * (11 - length)) + .))),
+      fields: {fldName0000000001: ("Task \($page * 100 + $i) " + ("x" * 400)),
+               fldDue00000000001: "2026-11-01", fldStatus00000001: "Next"}}]}
+    + (if $page + 1 < $pages then {offset: "p\($page + 1)"} else {} end)'
+  printf '\n200'; exit 0
 fi
 case "$method $url" in
   "GET https://api.airtable.com/v0/meta/whoami") body='{"id":"usrTest0000000001"}' ;;

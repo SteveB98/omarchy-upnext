@@ -5,6 +5,8 @@
 # The state comes from $XDG_RUNTIME_DIR/upnext-demo: live | light | limit | setup
 # Ticks, adds and deletes change $XDG_RUNTIME_DIR/upnext-demo-tasks.json, so
 # they survive the next refresh; `upnext reset` puts the made-up tasks back.
+# The dates leave room before +14 days, so a task added "in 2 weeks" lands on
+# the Month tab's first page in the demo video.
 run=${XDG_RUNTIME_DIR:-/tmp}
 mode=$(cat "$run/upnext-demo" 2>/dev/null || echo live)
 store=$run/upnext-demo-tasks.json
@@ -18,14 +20,14 @@ esac
 
 seed() {
   jq -cn --arg y "$(d yesterday)" --arg t "$(d today)" --arg t1 "$(d tomorrow)" \
-    --arg t2 "$(d '+2 days')" --arg t4 "$(d '+4 days')" --arg t9 "$(d '+9 days')" --arg t20 "$(d '+20 days')" '[
+    --arg t2 "$(d '+2 days')" --arg t16 "$(d '+16 days')" --arg t20 "$(d '+20 days')" --arg t24 "$(d '+24 days')" '[
       {id:"recDemo0000000001", name:"Send the October invoice to Northwind", project:"Northwind Rebrand", due:$y, status:"Next", priority:"High"},
       {id:"recDemo0000000002", name:"Review homepage copy", project:"Northwind Rebrand", due:$t, status:"In Progress", priority:"Urgent"},
       {id:"recDemo0000000003", name:"Book the venue for the launch party", project:"Q4 Launch", due:$t, status:"Next", priority:"Medium"},
       {id:"recDemo0000000004", name:"Renew the domain", project:"Admin", due:$t1, status:"Inbox", priority:"Low"},
       {id:"recDemo0000000005", name:"Draft the 2027 roadmap", project:"Planning", due:$t2, status:"Next", priority:"High"},
-      {id:"recDemo0000000006", name:"Call the print shop about proofs", project:"Q4 Launch", due:$t4, status:"Inbox", priority:"Medium"},
-      {id:"recDemo0000000007", name:"Quarterly backup check", project:"Admin", due:$t9, status:"Next", priority:"Low"},
+      {id:"recDemo0000000006", name:"Call the print shop about proofs", project:"Q4 Launch", due:$t16, status:"Inbox", priority:"Medium"},
+      {id:"recDemo0000000007", name:"Quarterly backup check", project:"Admin", due:$t24, status:"Next", priority:"Low"},
       {id:"recDemo0000000008", name:"Ship the case study", project:"Portfolio", due:$t20, status:"Next", priority:"Medium"}
     ]' > "$store"
 }

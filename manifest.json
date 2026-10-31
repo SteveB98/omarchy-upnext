@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.steveb98.upnext",
   "name": "Up Next",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "Steve B",
   "license": "MIT",
   "description": "Your Airtable tasks in the Omarchy bar: due today, tomorrow, this week and the next 31 days. Tick to complete or delete, add tasks with natural dates (\"fri\", \"in 2 weeks\"), and a guided setup that maps any Airtable table. Works on Airtable's Free and Team plans.",

@@ -280,17 +280,21 @@ Panel {
     root.formError = ""
     // A new project is created first; applyNewProject() then calls back here
     // with the real record, so a failed task add never duplicates the project.
+    // What was typed goes over stdin (Job.input): other local accounts can
+    // read every process's arguments.
     if (selectedProject && selectedProject.isNew) {
-      newProjProc.command = [root.helper, "newproject", selectedProject.name]
+      newProjProc.input = JSON.stringify({ name: selectedProject.name })
       newProjProc.running = true
       return
     }
     addProc.due = dueParsed
     addProc.name = nameField.text.trim()
-    addProc.command = [root.helper, "add", addProc.name,
-      selectedProject ? selectedProject.id : "-",
-      startParsed !== "" ? startParsed : "-",
-      dueParsed]
+    addProc.input = JSON.stringify({
+      name: addProc.name,
+      project: selectedProject ? selectedProject.id : "",
+      start: startParsed,
+      due: dueParsed
+    })
     addProc.running = true
   }
 
@@ -333,11 +337,20 @@ Panel {
   // exited. Those two signals come in no fixed order, and the next command in
   // a chain (the queued write, the task after its new project) can only start
   // once the process has exited.
+  // input is written to the helper's stdin as one line of JSON. Anything the
+  // user typed goes this way, never into command, because other local
+  // accounts can read every process's arguments (/proc/<pid>/cmdline).
   component Job: Process {
     id: self
     signal settled(string text)
+    property string input: ""
     property string out: ""
     property bool gotOut: false
+    stdinEnabled: true
+    onStarted: {
+      if (input !== "") write(input + "\n")
+      input = ""
+    }
     function settle() {
       if (running || !gotOut) return
       gotOut = false
@@ -418,6 +431,7 @@ Panel {
 
   Job {
     id: newProjProc
+    command: [root.helper, "newproject"]   // the name goes over stdin (input)
     onSettled: function(text) { root.applyNewProject(text) }
   }
 
@@ -425,6 +439,7 @@ Panel {
     id: addProc
     property string due: ""
     property string name: ""
+    command: [root.helper, "add"]          // the task goes over stdin (input)
     onSettled: function(text) { root.applyAdd(text) }
   }
 
@@ -565,8 +580,12 @@ Panel {
     if (queue.length === 0) { drained(); return }
     setProc.current = queue[0]
     root.queue = queue.slice(1)
-    setProc.command = setProc.current.del ? [root.helper, "delete", setProc.current.id]
-                                          : [root.helper, "set", setProc.current.id, setProc.current.status]
+    if (setProc.current.del) {
+      setProc.command = [root.helper, "delete", setProc.current.id]
+    } else {
+      setProc.command = [root.helper, "set"]
+      setProc.input = JSON.stringify({ id: setProc.current.id, status: setProc.current.status })
+    }
     setProc.running = true
   }
 

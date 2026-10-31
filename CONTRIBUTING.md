@@ -14,7 +14,8 @@ shellcheck -x upnext tests/run.sh tests/bin/* tools/hooks/* tools/demo/upnext to
 
 ## Trying UI changes without Airtable
 
-`tools/demo/upnext` prints made-up tasks. Copy it over the `upnext` in your
+`tools/demo/upnext` prints made-up tasks and remembers ticks, adds and deletes
+(`upnext reset` starts over). Copy it over the `upnext` in your
 installed plugin folder (it's a git checkout, so `git checkout upnext` puts the
 real one back), and pick a state with
 `echo light > "$XDG_RUNTIME_DIR/upnext-demo"` (`live`, `light`, `limit`, `setup`).
@@ -24,5 +25,12 @@ real one back), and pick a state with
 - Keep the widget free of network code: Airtable calls belong in `upnext`,
   which prints one line of JSON per command.
 - Add or update tests for bridge changes.
+- Never put the token or anything the user typed (task and project names,
+  dates, statuses, Airtable's error text) in a process's arguments: other local
+  accounts can read them. The widget sends those to `upnext` as JSON on stdin
+  (`Job.input`); `upnext` passes them to `curl` with `PRIVATE_BODY` or
+  `PRIVATE_FORMULA` and to `jq` through stdin or the environment (`env.X`), not
+  `--arg` or `--data`. The canary test in `tests/run.sh` and
+  `tools/release-check` catch slips. Record, base, table and field ids are fine.
 - Run `tools/hooks/enable` once after cloning. The hooks keep commit trailers
   that credit AI tools out of the history; commits are credited to people.

@@ -1,0 +1,5 @@
+#!/bin/bash
+# jq shim for the tests: logs its arguments to argv.log, where the canary test
+# in tests/run.sh looks for private values, then runs the real jq.
+printf 'jq %s\n' "$*" >> "$FAKE_DIR/argv.log"
+exec "$REAL_JQ" "$@"

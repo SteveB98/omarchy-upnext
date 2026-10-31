@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.0.1 (2026-10-31)
+
+Security: what you type no longer appears in process arguments, which other
+accounts on the same computer can read.
+
+- Adding a task or project, and ticking one, sends the name, dates and status
+  to the `upnext` helper as JSON on stdin instead of as arguments.
+- `upnext` passes request bodies and the status filter to `curl` on stdin or as
+  `/dev/fd` files, and values to `jq` through stdin or the environment.
+  Airtable's error text is handled the same way.
+- Setup lists base, table, field and status names to `gum` on stdin.
+- `upnext add`, `newproject` and `set` now read their details as one line of
+  JSON on stdin (see the header of `upnext`).
+- A canary test and a release check keep it that way.
+
 ## 1.0.0 (2026-10-30)
 
 First public release.

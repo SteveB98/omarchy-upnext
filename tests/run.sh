@@ -6,6 +6,16 @@ HERE=$PWD
 UPNEXT=$HERE/../upnext
 pass=0 failed=0
 
+# tests/bin/jq logs every jq the helper runs; this script's own checks use the
+# real one, so expected values never land in argv.log.
+REAL_JQ=$(command -v jq)
+case $REAL_JQ in "$HERE"/*|"") echo "real jq not found on PATH"; exit 1 ;; esac
+export REAL_JQ
+jq() { "$REAL_JQ" "$@"; }
+
+# send <json> <command>: the helper reads what the user typed from stdin
+send() { local json=$1; shift; printf '%s\n' "$json" | "$UPNEXT" "$@"; }
+
 reset() {
   export FAKE_DIR=$HERE/.out
   rm -rf "$FAKE_DIR"; mkdir -p "$FAKE_DIR"
@@ -41,17 +51,19 @@ if grep -q 'Bearer\|patFake' "$FAKE_DIR/argv.log"; then
 else pass=$((pass + 1)); fi
 
 # second fetch reuses the project-name cache (team TTL 60s): one call, not two
-before=$(wc -l < "$FAKE_DIR/argv.log")
+before=$(grep -c -- --max-time "$FAKE_DIR/argv.log")  # curl calls only
 "$UPNEXT" fetch >/dev/null
-after=$(wc -l < "$FAKE_DIR/argv.log")
+after=$(grep -c -- --max-time "$FAKE_DIR/argv.log")
 check "project names are cached" ". == 1" "$((after - before))"
 
 reset
-out=$("$UPNEXT" set recTask0000000001 Done)
+out=$(send '{"id":"recTask0000000001","status":"Done"}' set)
 check "set ok" '.ok and .status == "Done"' "$out"
 check "set writes the status field by id" 'test("PATCH .*/recTask0000000001 .*\"fldStatus00000001\":\"Done\"")' "$(jq -Rs . "$FAKE_DIR/writes.log")"
-check "set refuses unknown statuses" '.ok == false and .error == "args"' "$("$UPNEXT" set recTask0000000001 Bogus)"
-check "set refuses bad record ids" '.ok == false and .error == "args"' "$("$UPNEXT" set 'rec;rm -rf' Done)"
+check "set refuses unknown statuses" '.ok == false and .error == "args"' "$(send '{"id":"recTask0000000001","status":"Bogus"}' set)"
+check "set refuses bad record ids" '.ok == false and .error == "args"' "$(send '{"id":"rec;rm -rf","status":"Done"}' set)"
+check "set without stdin is refused" '.ok == false and .error == "args"' "$("$UPNEXT" set </dev/null)"
+check "set with junk on stdin is refused" '.ok == false and .error == "args"' "$(send 'not json' set)"
 
 reset
 out=$("$UPNEXT" delete recTask0000000001)
@@ -65,17 +77,22 @@ reset
 check "deleting a task that's already gone succeeds" '.ok and .deleted and .gone' "$(FAKE_WRITE_CODE=404 "$UPNEXT" delete recTask0000000001)"
 check "the gone check reads the table once" '. == 1' "$(grep -cF -- '-G https://api.airtable.com/v0/appTestBase000001/tblTestTasks00001 ' "$FAKE_DIR/argv.log")"
 check "a 403 for one record also means gone" '.ok and .gone' "$(FAKE_WRITE_CODE=403 "$UPNEXT" delete recTask0000000001)"
-check "ticking a task that's gone says so" '.ok == false and .error == "gone"' "$(FAKE_WRITE_CODE=404 "$UPNEXT" set recTask0000000001 Done)"
-check "a table out of reach is still an access error" '.ok == false and .error == "access"' "$(FAKE_CODE=403 "$UPNEXT" set recTask0000000001 Done)"
+check "ticking a task that's gone says so" '.ok == false and .error == "gone"' "$(FAKE_WRITE_CODE=404 send '{"id":"recTask0000000001","status":"Done"}' set)"
+check "a table out of reach is still an access error" '.ok == false and .error == "access"' "$(FAKE_CODE=403 send '{"id":"recTask0000000001","status":"Done"}' set)"
 
 reset
-out=$("$UPNEXT" add "Ship it" recProj0000000001 2026-10-28 2026-11-02)
+out=$(send '{"name":"Ship it","project":"recProj0000000001","start":"2026-10-28","due":"2026-11-02"}' add)
 check "add ok" '.ok and .id == "recNew00000000001"' "$out"
 body=$(sed -n 's/^POST [^ ]* //p' "$FAKE_DIR/writes.log")
 check "add uses the new-task status and all mapped fields" '.fields == {"fldName0000000001":"Ship it","fldDue00000000001":"2026-11-02","fldStatus00000001":"Next","fldStart000000001":"2026-10-28","fldProject0000001":["recProj0000000001"]}' "$body"
-check "add rejects bad dates" '.ok == false' "$("$UPNEXT" add x - - 11/02)"
-check "add rejects bad project ids" '.ok == false' "$("$UPNEXT" add x 'recX"' - 2026-11-02)"
-check "add refuses unknown statuses" '.ok == false and .error == "args"' "$("$UPNEXT" add x - - 2026-11-02 Bogus)"
+check "add rejects bad dates" '.ok == false' "$(send '{"name":"x","due":"11/02"}' add)"
+check "add rejects bad project ids" '.ok == false' "$(send '{"name":"x","project":"recX\"","due":"2026-11-02"}' add)"
+check "add refuses unknown statuses" '.ok == false and .error == "args"' "$(send '{"name":"x","due":"2026-11-02","status":"Bogus"}' add)"
+check "add without stdin is refused" '.ok == false and .error == "args"' "$("$UPNEXT" add </dev/null)"
+reset
+send '{"name":"Bare","due":"2026-11-02"}' add >/dev/null
+body=$(sed -n 's/^POST [^ ]* //p' "$FAKE_DIR/writes.log")
+check "add leaves out an empty start and project" '.fields == {"fldName0000000001":"Bare","fldDue00000000001":"2026-11-02","fldStatus00000001":"Next"}' "$body"
 
 reset
 out=$("$UPNEXT" projects)
@@ -83,7 +100,7 @@ check "projects sorted, with client" '.ok and (.projects | map(.name)) == ["Alph
 check "projects hides done statuses" 'test("NOT\\(OR\\(\\{Status\\}=.Completed.\\)\\)")' "$(grep '^filterByFormula=' "$FAKE_DIR/params.log" | jq -Rs .)"
 
 reset
-out=$("$UPNEXT" newproject "New thing")
+out=$(send '{"name":"New thing"}' newproject)
 check "newproject ok" '.ok and .project.name == "New thing" and .project.id == "recNew00000000001"' "$out"
 body=$(sed -n 's/^POST [^ ]* //p' "$FAKE_DIR/writes.log")
 check "newproject sets status and start" '.fields.fldPStatus0000001 == "Active" and (.fields.fldPStart00000001 | test("^[0-9-]{10}$"))' "$body"
@@ -127,6 +144,24 @@ check "a project-name hiccup keeps the tasks" '.ok and (.tasks | length) == 2 an
 reset
 check "a project-name auth error is reported" '.ok == false and .error == "auth"' "$(FAKE_PROJECTS_CODE=401 "$UPNEXT" fetch)"
 
+# ---- nothing private on a command line: other local accounts can read every
+# process's arguments. Task and project names, dates, statuses and Airtable's
+# error text must reach curl and jq through stdin, files or the environment.
+reset
+canary="CANARY$RANDOM"
+send "{\"name\":\"$canary-task\",\"project\":\"recProj0000000001\",\"start\":\"2026-10-28\",\"due\":\"2026-11-02\"}" add >/dev/null
+send "{\"name\":\"$canary-project\"}" newproject >/dev/null
+send '{"id":"recTask0000000001","status":"Bob'"'"'s \\ stuff"}' set >/dev/null
+"$UPNEXT" fetch >/dev/null
+"$UPNEXT" projects >/dev/null
+out=$(FAKE_CODE=422 FAKE_BODY="{\"error\":{\"type\":\"INVALID_VALUE\",\"message\":\"Bad value $canary-error\"}}" send '{"name":"x","due":"2026-11-02"}' add)
+check "Airtable's error text still reaches the widget" ".message | contains(\"$canary-error\")" "$out"
+check "the canaries really were sent" ". == 2" "$(grep -c "$canary" "$FAKE_DIR/writes.log")"
+check "the status filter was still sent" 'test("Bob")' "$(grep '^filterByFormula=' "$FAKE_DIR/params.log" | jq -Rs .)"
+leaks=$(grep -nE "$canary|Bob|2026-10-28|2026-11-02" "$FAKE_DIR/argv.log")
+check "no name, date, status or error text in any curl or jq arguments" '. == ""' "$(jq -Rn --arg l "$leaks" '$l')"
+[ -n "$leaks" ] && echo "$leaks" | head -5
+
 # usage rolls over by month
 reset
 mkdir -p "$UPNEXT_STATE"
@@ -155,6 +190,7 @@ if [ -s "$UPNEXT_CONFIG" ]; then
   check "setup plan" '.plan == "team" and .planSource == "setup"' "$cfgjson"
   check "setup config is private" '. == "600"' "$(stat -c %a "$UPNEXT_CONFIG" | jq -R .)"
   check "setup ends with a working fetch" 'test("Done\\. 2 open tasks")' "$(jq -Rs . <<<"$out")"
+  check "setup keeps status and field names off command lines" '. == ""' "$(grep -nE "Bob|Project Name" "$FAKE_DIR/argv.log" | jq -Rs 'rtrimstr("\n")')"
 else
   failed=$((failed + 1)); echo "FAIL: setup wrote no config"; echo "$out" | tail -15
 fi

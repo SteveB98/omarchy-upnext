@@ -32,7 +32,8 @@ seed() {
     ]' > "$store"
 }
 tasks() { [ -s "$store" ] || seed; cat "$store"; }
-save() { local tmp; tmp=$(mktemp "$store.XXXXXX") && cat > "$tmp" && mv "$tmp" "$store"; }
+# Keeps the old list if the new one is empty (a failed jq), so a slip never wipes the demo.
+save() { local tmp; tmp=$(mktemp "$store.XXXXXX") && cat > "$tmp" && if [ -s "$tmp" ]; then mv "$tmp" "$store"; else rm -f "$tmp"; fi; }
 
 projects='[{"id":"recDemoP000000001","name":"Admin","client":"","status":"Active"},{"id":"recDemoP000000002","name":"Northwind Rebrand","client":"Northwind","status":"Active"},{"id":"recDemoP000000003","name":"Planning","client":"","status":"Active"},{"id":"recDemoP000000004","name":"Portfolio","client":"","status":"Active"},{"id":"recDemoP000000005","name":"Q4 Launch","client":"Acme","status":"Active"}]'
 no_config='{"ok":false,"error":"no-config","message":"Up Next isn'"'"'t set up yet"}'
@@ -52,19 +53,23 @@ case $1 in
     tasks | jq -c --arg plan $plan --argjson calls $calls \
       '{ok:true, fetchedAt:(now|floor), plan:$plan, calls:$calls, tasks:map(select(.status != "Done"))}' ;;
   projects) jq -cn --argjson p "$projects" '{ok:true, projects:$p}' ;;
-  set)
-    tasks | jq -c --arg id "$2" --arg s "$3" 'map(if .id == $id then .status = $s else . end)' | save
-    jq -cn --arg id "$2" --arg s "$3" '{ok:true,id:$id,status:$s}' ;;
+  set)   # stdin: {"id","status"}, like the real helper
+    IFS= read -r -t 10 input
+    { tasks; printf '\n%s' "$input"; } | jq -cs '.[1] as $in | .[0] | map(if .id == $in.id then .status = $in.status else . end)' | save
+    jq -c '{ok:true, id, status}' <<<"$input" ;;
   delete)
     tasks | jq -c --arg id "$2" 'map(select(.id != $id))' | save
     jq -cn --arg id "$2" '{ok:true,id:$id,deleted:true}' ;;
-  add)
+  add)   # stdin: {"name","project","start","due","status"}
+    IFS= read -r -t 10 input
     id=recDemoNew$(printf '%07d' $(( $(date +%s%N) / 1000000 % 10000000 )))
-    project=$(jq -r --arg p "$3" '.[] | select(.id == $p) | .name' <<<"$projects")
-    tasks | jq -c --arg id "$id" --arg n "$2" --arg p "$project" --arg due "$5" --arg s "${6:-Next}" \
-      '. + [{id:$id, name:$n, project:$p, due:$due, status:$s, priority:""}]' | save
+    { tasks; printf '\n%s\n%s' "$projects" "$input"; } | ID=$id jq -cs '
+      .[2] as $in | ([.[1][] | select(.id == $in.project) | .name] | first // "") as $p
+      | .[0] + [{id:env.ID, name:$in.name, project:$p, due:$in.due, status:($in.status // "Next"), priority:""}]' | save
     jq -cn --arg id "$id" '{ok:true,id:$id}' ;;
-  newproject) jq -cn --arg n "$2" '{ok:true,project:{id:"recDemoP000000009",name:$n,client:"",status:""}}' ;;
+  newproject)   # stdin: {"name"}
+    IFS= read -r -t 10 input
+    jq -c '{ok:true,project:{id:"recDemoP000000009",name,client:"",status:""}}' <<<"$input" ;;
   reset) seed; echo '{"ok":true}' ;;
   *) echo '{"ok":false,"error":"args","message":"demo"}' ;;
 esac

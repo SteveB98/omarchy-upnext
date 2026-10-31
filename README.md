@@ -228,8 +228,11 @@ It only shows if its status is one of your open statuses and it has a due date.
   never in a plain file. The field mapping lives in
   `~/.config/upnext/config.json` (owner-only), outside the plugin folder, so
   updating or removing the plugin doesn't touch it.
-- The token is never passed on a command line, so other accounts on the same
-  computer can't read it from the process list.
+- Nothing private is passed on a command line, so other accounts on the same
+  computer can't read it from the process list: not the token, and not what
+  you type (task and project names, dates, statuses). The widget hands those
+  to `upnext` on stdin, and `upnext` hands them to `curl` and `jq` the same
+  way. The tests check this with canary values.
 - The only network requests go to `api.airtable.com`. Links you click open
   `airtable.com` pages built from record IDs that are checked first.
 - Status and field names are escaped before they go into Airtable formulas.

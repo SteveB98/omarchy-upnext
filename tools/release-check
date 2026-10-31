@@ -56,6 +56,18 @@ if git grep -nIiE '(curl|wget)[^|]*\|[[:space:]]*(ba|z)?sh\b' "${scanned[@]}"; t
   bad "pipes a download into a shell"
 fi
 
+step "nothing private on a command line"
+# Other local accounts can read every process's arguments. What the user typed
+# goes to the helper on stdin and on to curl and jq through stdin, /dev/fd files
+# or the environment (see the header of upnext). tests/run.sh checks that at
+# runtime with canary values; these greps catch the usual slips first.
+if grep -nE -- '--data[ =]"|filterByFormula=|--arg [A-Za-z_]+ "\$\{?(name|status|start|due|project|open|done_status|new|pnew|pick|INPUT|body)[}"]' upnext; then
+  bad "upnext passes a private value as an argument (use PRIVATE_BODY, PRIVATE_FORMULA or env)"
+fi
+if grep -nE 'command[ :=]+.*\[.*(\.name|\.text|Parsed|status)' BarWidget.qml; then
+  bad "a Process command carries what the user typed (send it as Job.input)"
+fi
+
 step "no em dashes"
 if git grep -nI $'\u2014'; then
   bad "em dash in a tracked file (use a colon, comma or parentheses)"

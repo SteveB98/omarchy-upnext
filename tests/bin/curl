@@ -16,8 +16,13 @@ for ((i = 0; i < ${#args[@]}; i++)); do
     -X) method=${args[i+1]} ;;
     -H) [[ ${args[i+1]} == @* ]] && hdr=$(cat "${args[i+1]#@}") ;;
     --data) data=${args[i+1]} ;;
-    --data-urlencode) printf '%s\n' "${args[i+1]}" >> "$FAKE_DIR/params.log"
-                      [[ ${args[i+1]} == offset=* ]] && offset=${args[i+1]#offset=} ;;
+    # The real helper sends bodies on stdin and private query values as files.
+    --data-binary) if [ "${args[i+1]}" = @- ]; then data=$(cat); else data=${args[i+1]}; fi ;;
+    --data-urlencode)
+      param=${args[i+1]}
+      [[ $param =~ ^([A-Za-z]+)@(/.*)$ ]] && param="${BASH_REMATCH[1]}=$(cat "${BASH_REMATCH[2]}")"
+      printf '%s\n' "$param" >> "$FAKE_DIR/params.log"
+      [[ $param == offset=* ]] && offset=${param#offset=} ;;
     https://*) url=${args[i]} ;;
   esac
 done
@@ -42,7 +47,7 @@ if [ -n "$FAKE_NO_SCHEMA" ] && [[ $url == */meta/bases* ]]; then
 fi
 if [ -n "$FAKE_PAGES" ] && [ "$method $url" = "GET https://api.airtable.com/v0/appTestBase000001/tblTestTasks00001" ]; then
   page=${offset#p}; page=${page:-0}
-  jq -cn --argjson page "$page" --argjson pages "$FAKE_PAGES" '
+  "${REAL_JQ:-jq}" -cn --argjson page "$page" --argjson pages "$FAKE_PAGES" '
     {records: [range(100) as $i | {
       id: ("recBig" + ("\($page * 100 + $i)" | (("0" * (11 - length)) + .))),
       fields: {fldName0000000001: ("Task \($page * 100 + $i) " + ("x" * 400)),
